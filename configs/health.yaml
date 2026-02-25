@@ -1,0 +1,30 @@
+# 健康检查配置
+
+enabled: true
+check_interval_s: 60
+
+checks:
+  plc_connection:
+    enabled: true
+    timeout_s: 5
+  model_loaded:
+    enabled: true
+  disk_space:
+    enabled: true
+    min_free_mb: 100
+  inference_latency:
+    enabled: true
+    max_ms: 500
+  data_integrity:
+    enabled: true
+    pressure_range: [0, 2000]
+    min_pressure_points: 2
+  polling_thread:
+    enabled: true
+  fsm_stuck:
+    enabled: true
+    max_stuck_duration_s: 120
+
+fault_report:
+  log_to_file: true
+  write_to_plc: true

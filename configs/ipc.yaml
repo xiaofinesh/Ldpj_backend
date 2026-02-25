@@ -1,0 +1,16 @@
+# 工控机通讯配置
+
+api_server:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8000
+  api_key: "change-me-in-production"
+
+alarm_pusher:
+  enabled: true
+  targets:
+    - url: "http://192.168.0.20:9000/api/alarm"
+      timeout_s: 5
+      retries: 3
+  push_on_leak: false
+  min_fault_level_to_push: "ERROR"  # INFO, WARNING, ERROR, CRITICAL

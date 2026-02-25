@@ -1,0 +1,48 @@
+# 运行时参数配置
+
+logging:
+  level: INFO
+  file: ldpj_backend.log
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  rotate:
+    max_bytes: 5242880       # 5 MB
+    backup_count: 5
+
+# 模型推理阈值
+threshold: 0.3
+
+# 特征模式: "7d" (含 cavity_id) 或 "6d" (不含)
+feature_mode: "7d"
+feature_order_7d:
+  - max
+  - min
+  - difference
+  - average
+  - variance
+  - trend_slope
+  - cavity_id
+feature_order_6d:
+  - average
+  - difference
+  - max
+  - min
+  - trend_slope
+  - variance
+
+# 测试周期检测参数
+cycle_detection:
+  start_pressure_drop: 50.0       # 压力下降超过此值认为测试开始 (mbar)
+  end_pressure_rise: 50.0         # 压力回升超过此值认为测试结束 (mbar)
+  min_collection_points: 100      # 最少采集点数
+  max_collection_points: 3000     # 最多采集点数 (10ms 间隔下为 30 秒)
+  max_collection_duration_s: 45   # 最长采集时间 (秒)
+  collection_timeout_s: 60        # 采集超时时间 (秒)
+  idle_pressure_min: 900.0        # 空闲状态下的最低正常压力 (mbar)
+
+# 数据库配置
+database:
+  path: ldpj_data.db
+  max_size_mb: 500               # 数据库大小告警阈值
+
+# 主循环间隔 (秒)
+loop_interval: 0.05

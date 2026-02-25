@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+*.db
+*.csv
+logs/
+
+# Model artifacts (keep current/ structure but not the actual model files)
+models/artifacts/current/*.json
+models/artifacts/current/*.joblib
+models/artifacts/archive/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+# 模型管理配置
+
+current:
+  model_path: "models/artifacts/current/xgb_model.json"
+  scaler_path: "models/artifacts/current/xgb_scaler.joblib"
+  version: "none"
+  loaded_at: null
+
+archive_dir: "models/artifacts/archive"

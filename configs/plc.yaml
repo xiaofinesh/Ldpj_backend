@@ -1,0 +1,47 @@
+# PLC S7 连接与数据块配置
+# 基于 DB_Global [DB9] 的 Cabin Array 结构
+
+connection:
+  ip: "192.168.0.10"
+  rack: 0
+  slot: 1
+  reconnect_interval_s: 5
+  max_reconnect_attempts: 0  # 0 = 无限重试
+
+polling:
+  interval_ms: 10            # 数据采集间隔 (毫秒)
+  buffer_size: 10000         # 内存缓冲区大小 (帧数)
+
+# Cabin 数组定义 (对应 DB9 中的 Array[0.."舱数-1"] of "CabinParam")
+cabin_array:
+  db_number: 9
+  start_offset: 0
+  cabin_count: 6
+  cabin_size_bytes: 12       # 每个 CabinParam UDT 占 12 字节
+  fields:
+    - name: rt_ai
+      type: INT              # 2 字节, 偏移 0
+      description: "负压传感器实时模拟量通道值"
+    - name: rt_pressure
+      type: REAL             # 4 字节, 偏移 2
+      description: "负压传感器实时压力值"
+    - name: rt_position
+      type: INT              # 2 字节, 偏移 6
+      description: "实时位号"
+    - name: rt_angle
+      type: REAL             # 4 字节, 偏移 8
+      description: "实时角度值"
+
+# 结果写回配置
+write_back:
+  db_number: 9
+  byte_offset: 200
+  type: INT
+  scale: 10
+  base: 0
+
+# 故障码写入配置
+fault_write:
+  db_number: 9
+  byte_offset: 202
+  type: INT
