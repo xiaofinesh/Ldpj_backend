@@ -20,7 +20,7 @@ def plc_cfg() -> dict:
         "cabin_array": {
             "db_number": 9,
             "start_offset": 0,
-            "cabin_count": 6,
+            "cabin_count": 25,
             "cabin_size_bytes": 12,
         },
         "write_back": {"db_number": 9, "byte_offset": 200, "scale": 10, "base": 0},

@@ -11,17 +11,17 @@ from core.polling_engine import MockS7Connection, PollingEngine
 
 class TestMockConnection:
     def test_connect_disconnect(self):
-        conn = MockS7Connection(cabin_count=6)
+        conn = MockS7Connection(cabin_count=25)
         conn.connect()
         assert conn.connected
         conn.disconnect()
         assert not conn.connected
 
     def test_db_read(self):
-        conn = MockS7Connection(cabin_count=6, cabin_size=12)
+        conn = MockS7Connection(cabin_count=25, cabin_size=12)
         conn.connect()
-        data = conn.db_read(9, 0, 72)
-        assert len(data) == 72  # 6 cabins * 12 bytes
+        data = conn.db_read(9, 0, 300)
+        assert len(data) == 300  # 25 cabins * 12 bytes
 
 
 class TestPollingEngine:
@@ -40,7 +40,7 @@ class TestPollingEngine:
         time.sleep(0.2)
         frame = engine.get_latest_frame()
         assert frame is not None
-        assert len(frame.cabins) == 6
+        assert len(frame.cabins) == 25
         engine.stop()
 
     def test_drain_frames(self, plc_cfg):

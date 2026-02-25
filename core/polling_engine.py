@@ -105,7 +105,7 @@ class S7Connection:
 class MockS7Connection:
     """Generates synthetic PLC data for offline development."""
 
-    def __init__(self, cabin_count: int = 6, cabin_size: int = 12):
+    def __init__(self, cabin_count: int = 25, cabin_size: int = 12):
         self._cabin_count = cabin_count
         self._cabin_size = cabin_size
         self._connected = True
@@ -166,7 +166,7 @@ class PollingEngine:
         self._buffer_size = poll_cfg.get("buffer_size", 10000)
         self._db_number = cabin_cfg.get("db_number", 9)
         self._start_offset = cabin_cfg.get("start_offset", 0)
-        self._cabin_count = cabin_cfg.get("cabin_count", 6)
+        self._cabin_count = cabin_cfg.get("cabin_count", 25)
         self._cabin_size = cabin_cfg.get("cabin_size_bytes", 12)
         self._reconnect_interval = conn_cfg.get("reconnect_interval_s", 5)
 

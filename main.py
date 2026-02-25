@@ -96,7 +96,7 @@ def main() -> None:
     polling_engine.start()
 
     # ── 6. Cycle FSM manager ────────────────────────────────────────────
-    cabin_count = plc_cfg.get("cabin_array", {}).get("cabin_count", 6)
+    cabin_count = plc_cfg.get("cabin_array", {}).get("cabin_count", 25)
     cycle_cfg = runtime_cfg.get("cycle_detection", {})
     fsm_manager = CycleFSMManager(cabin_count, cycle_cfg)
 

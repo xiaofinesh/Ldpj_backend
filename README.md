@@ -4,14 +4,14 @@
 
 ## 概述
 
-本系统是一个部署在Linux工控机上的边缘AI后端，通过S7协议直连西门子PLC（CPU 1511-1 PN），高频采集6个测试舱室的真空压力曲线数据，利用XGBoost模型进行实时漏液检测推理，并将结果写回PLC供HMI显示。
+本系统是一个部署在Linux工控机上的边缘AI后端，通过S7协议直连西门子PLC（CPU 1511-1 PN），高频采集多个测试舱室（默认25个，可配置）的真空压力曲线数据，利用XGBoost模型进行实时漏液检测推理，并将结果写回PLC供HMI显示。
 
 ## 系统架构
 
 ```
 PLC (S7-1200/1500)
     │
-    ├── DB9: Cabin[0..5] × {RT_AI, RT_Pressure, RT_Position, RT_Angle}
+    ├── DB9: Cabin[0..24] × {RT_AI, RT_Pressure, RT_Position, RT_Angle}
     │
     ▼
 ┌─────────────────────────────────────────────┐
@@ -174,7 +174,7 @@ CSV文件，必须包含以下列：
 | 列名 | 类型 | 说明 |
 |------|------|------|
 | `pressure_data` | string (JSON array) | 压力时间序列 |
-| `cavity_id` | int | 舱室编号 (0-5) |
+| `cavity_id` | int | 舱室编号 (0-24，随配置调整) |
 | `label` | int | 标签 (0=漏液, 1=正常) |
 
 ### 模型输出
