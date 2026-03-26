@@ -1,0 +1,52 @@
+{
+  "version": "v1.2",
+  "trained_at": "2026-03-20T15:21:03",
+  "dataset": "漏孔打开_cleaned.csv",
+  "dataset_size": 13766,
+  "feature_mode": "7d",
+  "feature_order": [
+    "max",
+    "min",
+    "difference",
+    "average",
+    "variance",
+    "trend_slope",
+    "cavity_id"
+  ],
+  "label_convention": {
+    "0": "LEAK",
+    "1": "OK",
+    "description": "0=leak detected, 1=good seal / no leak"
+  },
+  "label_source": "valve",
+  "label_flipped": false,
+  "label_column": "leak_valve_status",
+  "use_precomputed_features": true,
+  "threshold": 0.2402,
+  "hyperparameters": {
+    "n_estimators": 200,
+    "max_depth": 5,
+    "learning_rate": 0.1,
+    "n_folds": 10
+  },
+  "evaluation": {
+    "accuracy": 0.999564,
+    "f1_score": 0.9996,
+    "precision": 0.999866,
+    "recall": 0.999333,
+    "auc_roc": 0.999852,
+    "leak_recall": 0.999841,
+    "ok_precision": 0.999866,
+    "cv_f1_mean": 0.999533,
+    "cv_f1_std": 0.000521
+  },
+  "feature_importance": {
+    "trend_slope": 0.76128,
+    "variance": 0.184345,
+    "difference": 0.047107,
+    "cavity_id": 0.003797,
+    "max": 0.001485,
+    "min": 0.001366,
+    "average": 0.00062
+  }
+}

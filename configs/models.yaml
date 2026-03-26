@@ -1,0 +1,9 @@
+# Model management configuration (auto-updated by script)
+
+current:
+  model_path: "models/artifacts/current/xgb_model.json"
+  scaler_path: "models/artifacts/current/xgb_scaler.joblib"
+  version: "v1.3"
+  loaded_at: null
+
+archive_dir: "models/artifacts/archive"

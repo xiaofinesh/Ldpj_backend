@@ -1,0 +1,52 @@
+{
+  "version": "v1.3",
+  "trained_at": "2026-03-24T08:50:56",
+  "dataset": "combined_training_data.csv",
+  "dataset_size": 19815,
+  "feature_mode": "7d",
+  "feature_order": [
+    "max",
+    "min",
+    "difference",
+    "average",
+    "variance",
+    "trend_slope",
+    "cavity_id"
+  ],
+  "label_convention": {
+    "0": "LEAK",
+    "1": "OK",
+    "description": "0=leak detected, 1=good seal / no leak"
+  },
+  "label_source": "valve",
+  "label_flipped": false,
+  "label_column": "leak_valve_status",
+  "use_precomputed_features": true,
+  "threshold": 0.284271,
+  "hyperparameters": {
+    "n_estimators": 200,
+    "max_depth": 5,
+    "learning_rate": 0.1,
+    "n_folds": 10
+  },
+  "evaluation": {
+    "accuracy": 0.999546,
+    "f1_score": 0.999587,
+    "precision": 0.999633,
+    "recall": 0.999541,
+    "auc_roc": 0.999891,
+    "leak_recall": 0.999551,
+    "ok_precision": 0.999633,
+    "cv_f1_mean": 0.999587,
+    "cv_f1_std": 0.000321
+  },
+  "feature_importance": {
+    "variance": 0.671452,
+    "trend_slope": 0.253941,
+    "difference": 0.068984,
+    "cavity_id": 0.003115,
+    "max": 0.001023,
+    "min": 0.000823,
+    "average": 0.000662
+  }
+}

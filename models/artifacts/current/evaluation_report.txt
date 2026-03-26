@@ -1,0 +1,46 @@
+Model Version: v1.3
+Trained At: 2026-03-24T08:50:56
+Dataset: combined_training_data.csv (19815 samples)
+Label source: valve
+Labels: 0=LEAK, 1=OK
+Features: pre-computed
+Threshold: 0.284271
+CV Folds: 10
+
+=== Metrics ===
+Accuracy:  0.9995
+F1-Score:  0.9996
+Precision: 0.9996
+Recall:    0.9995
+AUC-ROC:   0.9999
+10-Fold CV F1: 0.9996 (+/- 0.0003)
+
+=== Acceptance Check ===
+F1-Score >= 0.985:      0.9996  PASS
+Recall(LEAK) >= 0.990:  0.9996  PASS
+Precision(OK) >= 0.980: 0.9996  PASS
+
+=== Confusion Matrix ===
+             pred=LEAK  pred=OK
+  act=LEAK       8908        4
+  act=OK            5    10898
+
+=== Classification Report ===
+              precision    recall  f1-score   support
+
+     LEAK(0)       1.00      1.00      1.00      8912
+       OK(1)       1.00      1.00      1.00     10903
+
+    accuracy                           1.00     19815
+   macro avg       1.00      1.00      1.00     19815
+weighted avg       1.00      1.00      1.00     19815
+
+
+=== Feature Importance ===
+  variance            : 0.6715
+  trend_slope         : 0.2539
+  difference          : 0.0690
+  cavity_id           : 0.0031
+  max                 : 0.0010
+  min                 : 0.0008
+  average             : 0.0007

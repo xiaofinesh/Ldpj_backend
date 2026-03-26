@@ -1,0 +1,63 @@
+# 运行时参数配置 (v2.5 — 固定点数采集)
+#
+# 压力标度: 0 = 常压, ~600 = 满真空 (正值真空度)
+# 角度标度: RT_Angle 0~360°, 每工位 14.4°
+#
+# 采集策略 (v2.5):
+#   RT_Angle 越过 start_angle (100°) → 开始采集
+#   每 100ms 采集一个点, 固定采集 collection_points (36) 个
+#   备用结束: 角度先到 end_angle (276°) 就提前结束
+#   超时 → FAULT
+
+logging:
+  level: INFO
+  file: ldpj_backend.log
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  rotate:
+    max_bytes: 5242880
+    backup_count: 5
+
+# ── 标签定义 ────────────────────────────────────────────────
+# label =  1: OK (正常)
+# label =  0: LEAK (漏液)
+# label = -1: N/A (模型未加载)
+# label = -2: NO_BOTTLE (无瓶子, max < 50)
+
+# ── 模型推理 ──────────────────────────────────────────────────
+model_inference:
+  # 模型推理阈值
+  threshold: 0.284271
+feature_mode: "7d"
+feature_order_7d:
+  - max
+  - min
+  - difference
+  - average
+  - variance
+  - trend_slope
+  - cavity_id
+
+# 无瓶子判定: 压力最大值 < 此阈值 → label=-2, 跳过推理
+no_bottle_threshold: 50.0
+
+# ── 测试周期检测 (v2.5 固定点数) ───────────────────────────
+cycle_detection:
+  # 采集开始角度 (°): RT_Angle 上升沿穿越此值触发采集
+  start_angle: 100.0
+
+  # 固定采集点数: 每 200ms 一个点, 15 个 = 3.0s
+  collection_points: 15
+
+  # 采集间隔 (秒): 两个采样点之间的最小间隔
+  collection_interval_s: 0.2
+
+  # 超时 → FAULT (秒)
+  collection_timeout_s: 8.0
+
+# ── 数据库 ──────────────────────────────────────────────────
+database:
+  path: ldpj_data.db
+  max_size_mb: 500
+
+# ── 主循环 ──────────────────────────────────────────────────
+loop_interval: 0.05

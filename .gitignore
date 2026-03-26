@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.vscode/
+.idea/
+*.db
+*.csv
+logs/
+models/artifacts/current/*.json
+models/artifacts/current/*.joblib
+models/artifacts/archive/
+.DS_Store
+Thumbs.db

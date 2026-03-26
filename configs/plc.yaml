@@ -1,0 +1,82 @@
+# PLC S7 连接与数据块配置
+# 基于 DB_Global [DB9] 的 Cabin Array 结构
+# v2: CabinParam UDT 20字节，含 AI 结果写回字段
+# 注意: Cabin[0] 为预留舱, 实际使用 Cabin[1]~Cabin[25], 共 25 个舱
+
+connection:
+  ip: "192.168.0.10"
+  rack: 0
+  slot: 1
+  reconnect_interval_s: 5
+  max_reconnect_attempts: 0  # 0 = 无限重试
+
+polling:
+  interval_ms: 10            # 数据采集间隔 (毫秒)
+  buffer_size: 10000         # 内存缓冲区大小 (帧数)
+
+# Cabin 数组定义 (对应 DB9 中的 Array[0..25] of "CabinParam")
+#
+# CabinParam UDT 结构 (20 字节):
+#   偏移   字段                  类型      说明
+#   +0     RT_AI                INT (2B)  负压传感器实时模拟量通道值
+#   +2     RT_Pressure          REAL(4B)  负压传感器实时压力值
+#   +6     RT_Position          INT (2B)  实时位号
+#   +8     RT_Angle             REAL(4B)  实时角度值
+#   +12.0  leakTestResult_AI    Bool      AI 渗漏检测结果 (写回)
+#   +12.1  leakTestResult_PLC   Bool      PLC 渗漏检测结果
+#   +14    cabinHealthStatus    REAL(4B)  舱室健康度 (写回)
+#   +18.0  leakValveStatus      Bool      验证阀状态
+cabin_array:
+  db_number: 9
+  start_offset: 0
+  cabin_count: 26             # Array[0..25], PLC 定义 26 个 (Cabin[0] 预留)
+  cabin_size_bytes: 20        # 每个 CabinParam UDT 占 20 字节
+  active_start: 1             # 实际使用的起始 cabin index (跳过 Cabin[0])
+  active_end: 25              # 实际使用的结束 cabin index (含)
+  fields:
+    - name: rt_ai
+      type: INT
+      offset: 0
+      description: "负压传感器实时模拟量通道值"
+    - name: rt_pressure
+      type: REAL
+      offset: 2
+      description: "负压传感器实时压力值"
+    - name: rt_position
+      type: INT
+      offset: 6
+      description: "实时位号"
+    - name: rt_angle
+      type: REAL
+      offset: 8
+      description: "实时角度值"
+    - name: leak_test_result_ai
+      type: BOOL
+      offset: 12
+      bit: 0
+      description: "AI 渗漏检测结果 (写回)"
+    - name: leak_test_result_plc
+      type: BOOL
+      offset: 12
+      bit: 1
+      description: "PLC 渗漏检测结果"
+    - name: cabin_health_status
+      type: REAL
+      offset: 14
+      description: "舱室健康度 (写回)"
+    - name: leak_valve_status
+      type: BOOL
+      offset: 18
+      bit: 0
+      description: "验证阀状态"
+
+# 每个 cabin 内的写回字段偏移 (相对于 cabin 起始地址)
+write_back:
+  leak_result_ai_offset: 12   # leakTestResult_AI, Bool at bit 0
+  cabin_health_offset: 14     # cabinHealthStatus, REAL
+
+# 故障码写入配置 (全局, 在 cabin 数组之后: 26×20=520)
+fault_write:
+  db_number: 9
+  byte_offset: 520
+  type: INT

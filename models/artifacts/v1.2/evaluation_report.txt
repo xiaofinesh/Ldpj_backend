@@ -1,0 +1,46 @@
+Model Version: v1.2
+Trained At: 2026-03-20T15:21:03
+Dataset: 漏孔打开_cleaned.csv (13766 samples)
+Label source: valve
+Labels: 0=LEAK, 1=OK
+Features: pre-computed
+Threshold: 0.240200
+CV Folds: 10
+
+=== Metrics ===
+Accuracy:  0.9996
+F1-Score:  0.9996
+Precision: 0.9999
+Recall:    0.9993
+AUC-ROC:   0.9999
+10-Fold CV F1: 0.9995 (+/- 0.0005)
+
+=== Acceptance Check ===
+F1-Score >= 0.985:      0.9996  PASS
+Recall(LEAK) >= 0.990:  0.9998  PASS
+Precision(OK) >= 0.980: 0.9999  PASS
+
+=== Confusion Matrix ===
+             pred=LEAK  pred=OK
+  act=LEAK       6271        1
+  act=OK            5     7489
+
+=== Classification Report ===
+              precision    recall  f1-score   support
+
+     LEAK(0)       1.00      1.00      1.00      6272
+       OK(1)       1.00      1.00      1.00      7494
+
+    accuracy                           1.00     13766
+   macro avg       1.00      1.00      1.00     13766
+weighted avg       1.00      1.00      1.00     13766
+
+
+=== Feature Importance ===
+  trend_slope         : 0.7613
+  variance            : 0.1843
+  difference          : 0.0471
+  cavity_id           : 0.0038
+  max                 : 0.0015
+  min                 : 0.0014
+  average             : 0.0006
