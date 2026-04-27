@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.loaders import (
+    load_active_cycle_profile,
     load_health_config, load_ipc_config, load_models_config,
     load_plc_config, load_runtime_config,
 )
@@ -163,6 +164,16 @@ def main():
 
     # Logging: file=INFO always, console controlled by mode
     logger = setup_logging(runtime_cfg.get("logging", {}))
+
+    # ── Load active CycleProfile (v2.6) ────────────────────────────
+    # Task 1 only loads + validates the profile (logged for traceability).
+    # FSM still uses the legacy cycle_detection block until Task 2 wires
+    # the profile into CycleFSMManager.
+    try:
+        cycle_profile = load_active_cycle_profile()
+    except Exception as exc:
+        logger.error("Failed to load active cycle profile: %s", exc)
+        cycle_profile = None
 
     # ── Init subsystems ────────────────────────────────────────────
     fault_reporter = FaultReporter()

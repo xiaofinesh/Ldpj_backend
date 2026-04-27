@@ -7,6 +7,11 @@ from typing import Any, Dict
 
 import yaml
 
+from core.cycle_profile import (
+    CycleProfile,
+    load_active_cycle_profile as _load_active_cycle_profile_from_dict,
+)
+
 _BASE_DIR = Path(__file__).resolve().parent
 
 
@@ -35,3 +40,12 @@ def load_health_config() -> Dict[str, Any]:
 
 def load_ipc_config() -> Dict[str, Any]:
     return load_yaml("ipc.yaml")
+
+
+def load_active_cycle_profile() -> CycleProfile:
+    """Load runtime.yaml and extract the active CycleProfile (v2.6).
+
+    Convenience wrapper that reads runtime.yaml then dispatches to
+    core.cycle_profile.load_active_cycle_profile().
+    """
+    return _load_active_cycle_profile_from_dict(load_runtime_config())

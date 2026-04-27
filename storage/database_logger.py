@@ -26,8 +26,20 @@ CREATE INDEX IF NOT EXISTS idx_records_label ON test_records(label);
 
 # Migration for existing databases that lack new columns
 _MIGRATIONS = [
+    # v2.5
     "ALTER TABLE test_records ADD COLUMN leak_valve_status INTEGER",
     "ALTER TABLE test_records ADD COLUMN end_angle REAL",
+    # v2.6 — cycle profile + Q regression + product
+    "ALTER TABLE test_records ADD COLUMN cycle_profile_id TEXT",
+    "ALTER TABLE test_records ADD COLUMN pressure_data_compressed BLOB",
+    "ALTER TABLE test_records ADD COLUMN angle_data_compressed BLOB",
+    "ALTER TABLE test_records ADD COLUMN q_est REAL",
+    "ALTER TABLE test_records ADD COLUMN q_threshold REAL",
+    "ALTER TABLE test_records ADD COLUMN q_uncertainty REAL",
+    "ALTER TABLE test_records ADD COLUMN m1_q REAL",
+    "ALTER TABLE test_records ADD COLUMN m2_q REAL",
+    "ALTER TABLE test_records ADD COLUMN m_disagreement REAL",
+    "ALTER TABLE test_records ADD COLUMN product_id TEXT",
 ]
 
 
@@ -66,15 +78,26 @@ class DatabaseLogger:
     def log_record(self, cavity_id, pressures, angles, ai_values, positions,
                    features, label, probability, confidence, model_version,
                    duration_s, leak_valve_status=None, end_angle=None,
-                   batch_id="") -> int:
+                   batch_id="",
+                   # v2.6 fields (all default None for backward compatibility)
+                   cycle_profile_id=None,
+                   pressure_data_compressed=None,
+                   angle_data_compressed=None,
+                   q_est=None, q_threshold=None, q_uncertainty=None,
+                   m1_q=None, m2_q=None, m_disagreement=None,
+                   product_id=None) -> int:
         with self._lock:
             try:
                 ts = time.strftime("%Y-%m-%dT%H:%M:%S")
                 cur = self._conn.execute(
-                    "INSERT INTO test_records (batch_id,cavity_id,timestamp,pressure_data,"
+                    "INSERT INTO test_records ("
+                    "batch_id,cavity_id,timestamp,pressure_data,"
                     "angle_data,ai_data,position_data,features,label,probability,confidence,"
-                    "model_version,duration_s,point_count,leak_valve_status,end_angle"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "model_version,duration_s,point_count,leak_valve_status,end_angle,"
+                    "cycle_profile_id,pressure_data_compressed,angle_data_compressed,"
+                    "q_est,q_threshold,q_uncertainty,"
+                    "m1_q,m2_q,m_disagreement,product_id"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (batch_id, cavity_id, ts, json.dumps(pressures),
                      json.dumps(angles) if angles else None,
                      json.dumps(ai_values) if ai_values else None,
@@ -82,7 +105,10 @@ class DatabaseLogger:
                      json.dumps(features), label, probability, confidence,
                      model_version, round(duration_s, 3), len(pressures),
                      int(leak_valve_status) if leak_valve_status is not None else None,
-                     round(end_angle, 2) if end_angle is not None else None))
+                     round(end_angle, 2) if end_angle is not None else None,
+                     cycle_profile_id, pressure_data_compressed, angle_data_compressed,
+                     q_est, q_threshold, q_uncertainty,
+                     m1_q, m2_q, m_disagreement, product_id))
                 self._conn.commit()
                 return cur.lastrowid
             except Exception as exc:
