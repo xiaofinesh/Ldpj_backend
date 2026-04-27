@@ -1,0 +1,39 @@
+# 产品配置 — 每种产品 (瓶型 × 液体 × 缺陷规格) 对应一组判废参数
+#
+# Q_threshold: 客户判废阈值, 单位 Pa·m³/s
+# d_critical:  等效缺陷孔径, 单位 μm (与 Q_threshold 通过物理公式相互换算)
+# flow_regime: "laminar" 或 "choked", 决定换算公式
+# l_ref_mm:    参考壁厚 mm (laminar 时使用)
+
+default_product_id: "TEST"
+
+products:
+  TEST:
+    name: "测试产品 (实验用)"
+    bottle_volume_ml: 500
+    flow_regime: "laminar"
+    l_ref_mm: 0.5
+    q_threshold: 1.0e-3
+    notes: "实验阶段使用, Q_threshold 设较松"
+
+  P001:
+    name: "500mL 矿泉水"
+    bottle_volume_ml: 500
+    flow_regime: "laminar"
+    l_ref_mm: 0.5
+    q_threshold: 2.0e-3
+
+  P002:
+    name: "700mL 53° 白酒"
+    bottle_volume_ml: 700
+    flow_regime: "laminar"
+    l_ref_mm: 0.5
+    q_threshold: 1.5e-3
+
+  P003:
+    name: "330mL 啤酒"
+    bottle_volume_ml: 330
+    flow_regime: "choked"
+    l_ref_mm: 0.3
+    q_threshold: 5.0e-4
+    notes: "薄壁瓶, 走临界流"

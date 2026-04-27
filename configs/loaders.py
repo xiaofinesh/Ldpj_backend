@@ -100,3 +100,42 @@ def is_cabin_calibrated(cabins_cfg: Dict[str, Any], cabin_id: int) -> bool:
         return False
     notes = entry.get("notes", "") or ""
     return "占位" not in notes
+
+
+# ── Product configuration (v2.6) ──────────────────────────────────────
+
+def load_products_config(path: str | Path = "products.yaml") -> Dict[str, Any]:
+    """Load product configuration (Q_threshold per product).
+
+    Path is resolved relative to the configs/ directory if not absolute.
+
+    Returns
+    -------
+    dict with keys: default_product_id, products
+
+    Raises
+    ------
+    FileNotFoundError if the file is missing.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        p = _BASE_DIR / p
+    if not p.exists():
+        raise FileNotFoundError(f"products config not found: {p}")
+    with open(p, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def get_product(products_cfg: Dict[str, Any], product_id: str) -> Dict[str, Any]:
+    """Look up a product by id, falling back to the configured default.
+
+    Returns an empty dict if neither the requested product nor the default
+    can be resolved (so callers always get a Mapping back).
+    """
+    products = products_cfg.get("products", {}) or {}
+    if product_id in products:
+        return products[product_id]
+    default_id = products_cfg.get("default_product_id", "")
+    if default_id and default_id in products:
+        return products[default_id]
+    return {}
