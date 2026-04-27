@@ -1,9 +1,27 @@
-# Model management configuration (auto-updated by script)
+# Model management configuration (auto-updated by deploy_model.sh)
+#
+# v2.6 introduces two regression models (M1 / M2) that replace the v2.5
+# binary classifier. The old `current` block is retained until Task 8
+# rewires processing_loop, after which the v2.5 path can be dropped.
 
+# v2.5 binary classifier (used by pipeline.processing_loop until Task 8)
 current:
   model_path: "models/artifacts/current/xgb_model.json"
   scaler_path: "models/artifacts/current/xgb_scaler.joblib"
   version: "v1.3"
   loaded_at: null
+
+# v2.6 primary model — per-cabin linear regression for Q estimation
+m1:
+  version: "v2.6.0"
+  coefficients_path: "models/artifacts/current/m1_coefficients.json"
+
+# v2.6 secondary model — global XGBoost regression on 43-dim features
+# (used as health-monitoring cross-check, see Task 7)
+m2:
+  version: "v2.6.0"
+  model_path: "models/artifacts/current/m2_xgb_model.json"
+  scaler_path: "models/artifacts/current/m2_xgb_scaler.joblib"
+  metadata_path: "models/artifacts/current/m2_metadata.json"
 
 archive_dir: "models/artifacts/archive"
