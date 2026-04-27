@@ -70,6 +70,16 @@ class ResultSender:
           +18: leakValveStatus byte (preserved)
           +19: padding (preserved)
 
+        v2.6 semantics change
+        ---------------------
+        The third parameter is no longer a probability ∈ [0, 1] but the
+        Q_est leak rate in Pa·m³/s (typical range 1e-7..1e-2). The
+        ``cabinHealthStatus`` REAL field now carries Q_est. **HMI display
+        logic must be updated in lockstep with the backend rollout**,
+        otherwise the operator will see "health" plummet from 95% to 0.001
+        at the cutover. Coordinate with the automation engineer before
+        deploying v2.6 to production.
+
         Parameters
         ----------
         cabin_id : int
@@ -77,7 +87,10 @@ class ResultSender:
         label : int
             Inference label: 0 = leak, 1 = OK, -1 = unknown.
         probability : float
-            Model output probability (higher = more likely OK).
+            v2.5: probability of OK (∈ [0, 1]).
+            v2.6: Q_est leak rate (Pa·m³/s).
+            The bytes-on-wire format is identical (REAL); only the
+            interpretation changes.
         """
         # Guard: skip reserved Cabin[0] and out-of-range cabins
         if cabin_id < self._active_start or cabin_id > self._active_end:
