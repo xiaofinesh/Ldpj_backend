@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from core.cycle_fsm import CycleFSMManager, CycleState
+from core.cycle_profile import CycleProfile
 from core.features import compute_features, features_to_vector
 from core.polling_engine import PollingEngine
 from health.fault_reporter import FaultReporter
@@ -48,8 +49,10 @@ class ProcessingLoop:
         alarm_pusher: AlarmPusher,
         health_checker: HealthChecker,
         fault_reporter: FaultReporter,
+        profile: Optional[CycleProfile] = None,
     ):
         self._cfg = runtime_cfg
+        self._profile = profile          # v2.6: passed in for downstream use (Task 8)
         self._poller = polling_engine
         self._fsm = fsm_manager
         self._model = model

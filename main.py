@@ -166,14 +166,15 @@ def main():
     logger = setup_logging(runtime_cfg.get("logging", {}))
 
     # ── Load active CycleProfile (v2.6) ────────────────────────────
-    # Task 1 only loads + validates the profile (logged for traceability).
-    # FSM still uses the legacy cycle_detection block until Task 2 wires
-    # the profile into CycleFSMManager.
+    # v2.6: profile drives FSM and downstream feature/inference. A bad
+    # or missing profile is a startup-blocker — fail loudly rather than
+    # silently degrading to defaults.
     try:
         cycle_profile = load_active_cycle_profile()
     except Exception as exc:
         logger.error("Failed to load active cycle profile: %s", exc)
-        cycle_profile = None
+        print(f"  错误: 周期配方加载失败 — {exc}")
+        sys.exit(1)
 
     # ── Init subsystems ────────────────────────────────────────────
     fault_reporter = FaultReporter()
@@ -188,12 +189,14 @@ def main():
     polling_engine.start()
 
     cabin_cfg = plc_cfg.get("cabin_array", {})
-    cycle_cfg = runtime_cfg.get("cycle_detection", {})
     active_start = cabin_cfg.get("active_start", 1)
     active_end = cabin_cfg.get("active_end", 25)
     fsm_manager = CycleFSMManager(
-        cabin_cfg.get("cabin_count", 26), cycle_cfg,
-        active_start=active_start, active_end=active_end)
+        cabin_cfg.get("cabin_count", 26),
+        cycle_profile,
+        active_start=active_start,
+        active_end=active_end,
+    )
 
     model = SupervisedXGB(models_cfg, base_dir=PROJECT_ROOT)
     try:
@@ -223,7 +226,8 @@ def main():
         runtime_cfg=runtime_cfg, polling_engine=polling_engine,
         fsm_manager=fsm_manager, model=model, db_logger=db_logger,
         result_sender=result_sender, alarm_pusher=alarm_pusher,
-        health_checker=health_checker, fault_reporter=fault_reporter)
+        health_checker=health_checker, fault_reporter=fault_reporter,
+        profile=cycle_profile)
 
     # Auto-start processing
     proc_loop.start()

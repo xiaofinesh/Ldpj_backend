@@ -1,13 +1,12 @@
-"""Finite State Machine for test-cycle detection per cabin.
+"""Finite State Machine for full-cycle data collection (v2.6).
 
-v2.5: Fixed-count collection with angle trigger.
-      - IDLE → COLLECTING: when RT_Angle crosses start_angle (rising edge)
-      - COLLECTING: accumulate exactly collection_points samples (default 12)
-        with minimum collection_interval_s (100ms) between samples
-      - COLLECTING → PROCESSING: collected enough points (must collect all)
-      - Records end_angle at the moment collection finishes
-      - Timeout → FAULT
-      - Cabin[0] reserved; active range controlled by CycleFSMManager.
+v2.6 changes vs v2.5:
+- Driven by CycleProfile (typed object) rather than a flat dict
+- Trigger at angle crossing trigger_angle; trigger_angle=0° handled
+  via wrap-around detection (e.g. last=358° -> current=2°)
+- Backup end condition: angle wrap-back after >= 70% of target_points
+  (safety net for slightly slow sampling that still completes a full cycle)
+- CycleData carries cycle_profile_id for traceability into the DB
 """
 
 from __future__ import annotations
@@ -16,8 +15,9 @@ import enum
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
+from core.cycle_profile import CycleProfile
 from core.polling_engine import CabinFrame
 
 logger = logging.getLogger(__name__)
@@ -38,34 +38,39 @@ class CycleData:
     timestamps: List[float] = field(default_factory=list)
     ai_values: List[int] = field(default_factory=list)
     positions: List[int] = field(default_factory=list)
-    leak_valve_status: bool = False  # Sampled once at start of collection
-    end_angle: float = 0.0          # Angle when collection ended
+    leak_valve_status: bool = False        # Sampled once at start of collection
+    end_angle: float = 0.0                 # Angle when collection finished
     start_time: float = 0.0
+    cycle_profile_id: str = ""             # v2.6: which profile drove this cycle
 
 
 class CabinFSM:
-    """State machine for a single cabin (fixed-count collection).
+    """State machine for one cabin's full-cycle collection.
 
     Parameters
     ----------
     cabin_id : int
-        Cabin index (1-based, Cabin[0] is reserved).
-    cfg : dict
-        The ``cycle_detection`` section from ``runtime.yaml``.
+        Cabin index (1-based; Cabin[0] is reserved).
+    profile : CycleProfile
+        Profile defining trigger angle, sample count, interval, timeout.
     """
 
-    def __init__(self, cabin_id: int, cfg: Dict[str, Any]):
+    # Wrap-around tolerance: when last_angle > WRAP_FROM and current_angle <
+    # WRAP_BACK we consider 0° has been crossed (one full revolution).
+    WRAP_FROM_THRESHOLD = 330.0
+    WRAP_BACK_THRESHOLD = 30.0
+
+    # Fraction of target_points required for the wrap-back safety net to
+    # accept the cycle. Below this we treat wrap-back as data loss + retrigger.
+    WRAP_BACK_MIN_FRACTION = 0.7
+
+    def __init__(self, cabin_id: int, profile: CycleProfile):
         self.cabin_id = cabin_id
+        self._profile = profile
         self._state = CycleState.IDLE
         self._data = CycleData()
         self._last_angle: Optional[float] = None
         self._last_sample_ts: float = 0.0
-
-        # ── Configuration ─────────────────────────────────────────
-        self._start_angle = cfg.get("start_angle", 100.0)
-        self._target_points = cfg.get("collection_points", 12)
-        self._sample_interval = cfg.get("collection_interval_s", 0.1)
-        self._timeout = cfg.get("collection_timeout_s", 8.0)
 
     # -- public interface ----------------------------------------------------
 
@@ -82,7 +87,7 @@ class CabinFSM:
         return len(self._data.pressures)
 
     def update(self, frame: CabinFrame) -> CycleState:
-        """Feed a new data point and return the (possibly updated) state."""
+        """Feed a polling frame and possibly transition state."""
         angle = frame.rt_angle
         ts = frame.timestamp
 
@@ -99,7 +104,6 @@ class CabinFSM:
         return self._data
 
     def reset(self) -> None:
-        """Reset to IDLE and clear accumulated data."""
         self._state = CycleState.IDLE
         self._data = CycleData()
         self._last_angle = None
@@ -111,55 +115,89 @@ class CabinFSM:
         logger.warning("Cabin %d: forced FAULT (%s)", self.cabin_id, reason)
 
     def clear_fault(self) -> None:
-        self._state = CycleState.IDLE
-        self._data = CycleData()
-        self._last_angle = None
-        self._last_sample_ts = 0.0
+        self.reset()
         logger.info("Cabin %d: FAULT cleared -> IDLE", self.cabin_id)
 
-    # -- internal state handlers ---------------------------------------------
+    # -- internal handlers ---------------------------------------------------
 
     def _handle_idle(self, angle: float, ts: float, frame: CabinFrame) -> None:
-        """Detect start: angle crosses start_angle upward."""
-        if self._last_angle is not None:
-            if self._last_angle < self._start_angle <= angle:
-                self._state = CycleState.COLLECTING
-                self._data = CycleData(
-                    start_time=ts,
-                    leak_valve_status=frame.leak_valve_status,
-                )
-                self._append(frame)
-                self._last_sample_ts = ts
-                logger.info(
-                    "Cabin %d: IDLE -> COLLECTING (angle %.1f° crossed %.1f°)",
-                    self.cabin_id, angle, self._start_angle,
-                )
+        """Detect collection trigger.
+
+        - For trigger_angle > 0: rising-edge crossing (last < trigger <= angle)
+        - For trigger_angle == 0: wrap-around detection (last in [330°, 360°),
+          current in (0°, 30°]), since a literal "<0 < 0" comparison is empty.
+        """
+        if self._last_angle is None:
+            return
+
+        trigger = self._profile.trigger_angle
+
+        crossed = False
+        if trigger > 0:
+            if self._last_angle < trigger <= angle:
+                crossed = True
+        else:
+            # Trigger at 0°: detect angle wrapping past 360° -> 0°
+            if (self._last_angle >= self.WRAP_FROM_THRESHOLD
+                    and angle <= self.WRAP_BACK_THRESHOLD):
+                crossed = True
+
+        if not crossed:
+            return
+
+        self._state = CycleState.COLLECTING
+        self._data = CycleData(
+            start_time=ts,
+            leak_valve_status=frame.leak_valve_status,
+            cycle_profile_id=self._profile.profile_id,
+        )
+        self._append(frame)
+        self._last_sample_ts = ts
+        logger.info(
+            "Cabin %d: IDLE -> COLLECTING (trigger=%.1f°, %.1f° -> %.1f°)",
+            self.cabin_id, trigger, self._last_angle, angle,
+        )
 
     def _handle_collecting(self, angle: float, ts: float, frame: CabinFrame) -> None:
-        """Collect exactly target_points samples at regular intervals."""
+        """Collect samples at regular intervals until target count or wrap-back."""
         elapsed = ts - self._data.start_time
 
-        # ── Sample at interval ────────────────────────────────────
+        # Sample at interval (since_last >= interval)
         since_last = ts - self._last_sample_ts
-        if since_last >= self._sample_interval:
+        if since_last >= self._profile.collection_interval_s:
             self._append(frame)
             self._last_sample_ts = ts
 
-        # ── End condition: reached target point count ─────────────
-        if len(self._data.pressures) >= self._target_points:
+        target_points = self._profile.collection_points
+        n_collected = len(self._data.pressures)
+
+        # ── End condition 1: reached target point count ───────────
+        if n_collected >= target_points:
             self._data.end_angle = angle
             self._transition_to_processing(
-                f"collected {self._target_points} points, end_angle={angle:.1f}°"
+                f"collected {target_points} points, end_angle={angle:.1f}°"
             )
             return
 
-        # ── Fault: timeout ────────────────────────────────────────
-        if elapsed >= self._timeout:
+        # ── End condition 2: angle wrap-back (full revolution) ────
+        # Safety net for slightly slow sampling that still completed a cycle.
+        if (self._last_angle is not None
+                and self._last_angle >= self.WRAP_FROM_THRESHOLD
+                and angle <= self.WRAP_BACK_THRESHOLD
+                and n_collected >= target_points * self.WRAP_BACK_MIN_FRACTION):
+            self._data.end_angle = angle
+            self._transition_to_processing(
+                f"wrap-back ({n_collected}/{target_points} points)"
+            )
+            return
+
+        # ── End condition 3: timeout → FAULT ──────────────────────
+        if elapsed >= self._profile.collection_timeout_s:
             self._data.end_angle = angle
             self._state = CycleState.FAULT
             logger.warning(
-                "Cabin %d: COLLECTING -> FAULT (timeout %.1fs, %d points)",
-                self.cabin_id, elapsed, len(self._data.pressures),
+                "Cabin %d: COLLECTING -> FAULT (timeout %.1fs, %d/%d points)",
+                self.cabin_id, elapsed, n_collected, target_points,
             )
 
     def _transition_to_processing(self, reason: str) -> None:
@@ -179,40 +217,28 @@ class CabinFSM:
 
 
 class CycleFSMManager:
-    """Manages FSM instances for all active cabins.
-
-    Parameters
-    ----------
-    cabin_count : int
-        Total cabins in PLC array (including reserved Cabin[0]).
-    cycle_cfg : dict
-        The ``cycle_detection`` section from ``runtime.yaml``.
-    active_start : int
-        First active cabin index (default 1).
-    active_end : int | None
-        Last active cabin index inclusive.
-    """
+    """Manages FSM instances for all active cabins (v2.6: profile-driven)."""
 
     def __init__(
         self,
         cabin_count: int,
-        cycle_cfg: Dict[str, Any],
+        profile: CycleProfile,
         active_start: int = 1,
         active_end: Optional[int] = None,
     ):
         if active_end is None:
             active_end = cabin_count - 1
+        self._profile = profile
         self.fsms: Dict[int, CabinFSM] = {
-            i: CabinFSM(i, cycle_cfg)
+            i: CabinFSM(i, profile)
             for i in range(active_start, active_end + 1)
         }
         logger.info(
             "CycleFSMManager: %d FSMs for Cabin[%d]~[%d] "
-            "(trigger=%.0f°, points=%d, interval=%.0fms)",
+            "(profile=%s, trigger=%.0f°, points=%d, interval=%.0fms)",
             len(self.fsms), active_start, active_end,
-            cycle_cfg.get("start_angle", 100.0),
-            cycle_cfg.get("collection_points", 12),
-            cycle_cfg.get("collection_interval_s", 0.1) * 1000,
+            profile.profile_id, profile.trigger_angle,
+            profile.collection_points, profile.collection_interval_s * 1000,
         )
 
     def get_processing_cabins(self) -> List[int]:

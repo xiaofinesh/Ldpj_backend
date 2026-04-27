@@ -12,7 +12,7 @@ connection:
 
 polling:
   interval_ms: 10            # 数据采集间隔 (毫秒)
-  buffer_size: 10000         # 内存缓冲区大小 (帧数)
+  buffer_size: 25000         # 内存缓冲区大小 (帧数, v2.6: 从 10000 提升以适配 70 点采集)
 
 # Cabin 数组定义 (对应 DB9 中的 Array[0..25] of "CabinParam")
 #
