@@ -1,0 +1,139 @@
+"""Tests for train.train_m1 (v2.6 Task 10)."""
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from models.linear_regression_m1 import LinearRegressionM1
+from tests.fixtures.generate_mock_q_data import generate
+from train.train_m1 import fit_one_cabin, main as train_main
+
+
+class TestFitOneCabin:
+    def test_perfect_linear_relation_recovers_coefs(self):
+        """Synthetic Q = 2.0 · slope + 0.5 → fit must recover (β, α)."""
+        slopes = np.linspace(-1, 1, 50)
+        q_values = 2.0 * slopes + 0.5
+        result = fit_one_cabin(slopes, q_values, bootstrap_samples=100, seed=0)
+        assert result is not None
+        assert result["beta"] == pytest.approx(2.0, rel=1e-6)
+        assert result["alpha"] == pytest.approx(0.5, rel=1e-6)
+        assert result["r_squared"] == pytest.approx(1.0, abs=1e-9)
+        assert result["n_samples"] == 50
+
+    def test_noisy_data_lowers_r2(self):
+        rng = np.random.default_rng(42)
+        slopes = np.linspace(-1, 1, 100)
+        q = 2.0 * slopes + 0.5 + rng.normal(0, 0.5, 100)  # heavy noise
+        result = fit_one_cabin(slopes, q, bootstrap_samples=100, seed=0)
+        assert 0.0 < result["r_squared"] < 1.0
+        # u_β > 0 for noisy data
+        assert result["u_beta"] > 0
+
+    def test_too_few_samples_returns_none(self):
+        result = fit_one_cabin(np.array([1.0, 2.0]), np.array([1.0, 2.0]),
+                               bootstrap_samples=10, seed=0)
+        assert result is None
+
+    def test_bootstrap_reproducible_with_seed(self):
+        """Same seed must give the same uncertainty estimates."""
+        rng = np.random.default_rng(42)
+        slopes = np.linspace(-1, 1, 50)
+        q = 2.0 * slopes + 0.5 + rng.normal(0, 0.1, 50)
+        a = fit_one_cabin(slopes, q, bootstrap_samples=200, seed=123)
+        b = fit_one_cabin(slopes, q, bootstrap_samples=200, seed=123)
+        assert a["u_beta"] == b["u_beta"]
+        assert a["u_alpha"] == b["u_alpha"]
+
+
+class TestCli:
+    @pytest.fixture
+    def labeled_csv(self, tmp_path):
+        df = generate(n_cabins=5, n_rounds=12, seed=42)
+        # train_m1 reads slope from features JSON or a direct column.
+        # The mock fixture already populates 'features' (43-key JSON).
+        csv = tmp_path / "labeled.csv"
+        df.to_csv(csv, index=False)
+        return csv
+
+    def test_train_writes_loadable_coefficients(self, tmp_path, labeled_csv):
+        out_json = tmp_path / "m1_coefficients.json"
+        rc = train_main([
+            "--data", str(labeled_csv),
+            "--output", str(out_json),
+            "--version", "test_v1",
+            "--bootstrap-samples", "100",     # cheap for tests
+            "--min-samples-per-cabin", "5",   # mock has only 12 rounds
+        ])
+        assert rc == 0
+        assert out_json.exists()
+
+        # Round-trip through LinearRegressionM1
+        cfg = {"m1": {"coefficients_path": str(out_json.relative_to(tmp_path)),
+                      "version": "test_v1"}}
+        m1 = LinearRegressionM1(cfg, base_dir=tmp_path)
+        m1.load()
+        assert m1.loaded
+        assert m1.version == "test_v1"
+        assert m1.primary_section == "hold"
+        # All 5 cabins should be calibrated
+        assert m1.calibrated_cabins == [1, 2, 3, 4, 5]
+
+        # JSON content sanity
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        assert data["feature"] == "hold_trend_slope"
+        assert "n_cabins_calibrated" in data
+        assert data["n_cabins_calibrated"] == 5
+        for cid in [1, 2, 3, 4, 5]:
+            entry = data["cabins"][str(cid)]
+            assert "beta" in entry and "alpha" in entry
+            assert "u_beta" in entry and "u_alpha" in entry
+            assert entry["n_samples"] == 12  # 12 rounds per cabin
+
+    def test_skip_cabin_with_too_few_samples(self, tmp_path):
+        """When --min-samples-per-cabin is high, sparse cabins are skipped."""
+        df = generate(n_cabins=3, n_rounds=4, seed=7)
+        csv = tmp_path / "small.csv"
+        df.to_csv(csv, index=False)
+        out_json = tmp_path / "m1.json"
+        rc = train_main([
+            "--data", str(csv),
+            "--output", str(out_json),
+            "--version", "skipped",
+            "--bootstrap-samples", "50",
+            "--min-samples-per-cabin", "100",  # higher than any cabin has
+        ])
+        assert rc == 0
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        assert data["n_cabins_calibrated"] == 0
+
+    def test_predict_round_trip(self, tmp_path, labeled_csv):
+        """Train M1, then call .predict() and check Q_est is finite + positive
+        for the same slopes the trainer saw."""
+        out_json = tmp_path / "m1.json"
+        rc = train_main([
+            "--data", str(labeled_csv),
+            "--output", str(out_json),
+            "--bootstrap-samples", "100",
+            "--min-samples-per-cabin", "5",
+        ])
+        assert rc == 0
+
+        cfg = {"m1": {"coefficients_path": str(out_json.relative_to(tmp_path))}}
+        m1 = LinearRegressionM1(cfg, base_dir=tmp_path)
+        m1.load()
+
+        # Pull the actual hold_trend_slope of one row from labeled CSV
+        df = pd.read_csv(labeled_csv)
+        row = df.iloc[0]
+        slope = json.loads(row["features"])["hold_trend_slope"]
+        result = m1.predict(slope, cabin_id=int(row["cavity_id"]))
+        assert result["cabin_calibrated"] is True
+        assert result["q_est"] > 0

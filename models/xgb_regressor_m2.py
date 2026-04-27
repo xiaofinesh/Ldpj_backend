@@ -187,7 +187,9 @@ class XGBRegressorM2:
             if self._scaler is not None:
                 x_subset = self._scaler.transform(x_subset)
 
-            dmat = xgb.DMatrix(x_subset)
+            # Pass feature_names so a booster saved with them (training side
+            # uses feature_names for importance ranking) doesn't error here.
+            dmat = xgb.DMatrix(x_subset, feature_names=self._feature_subset)
             y_pred = float(self._model.predict(dmat)[0])
 
             if self._log_space:
