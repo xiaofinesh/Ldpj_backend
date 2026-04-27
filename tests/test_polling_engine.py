@@ -1,6 +1,7 @@
 """Unit tests for core.polling_engine module (mock mode).
 
-v2.1 修正: 测试用例适配 18 字节 CabinParam 和新增的 3 个字段.
+v2.5: 20-byte CabinParam (RT_AI/RT_Pressure/RT_Position/RT_Angle +
+      flags + cabinHealthStatus + leakValveStatus byte).
 """
 
 import sys
@@ -21,27 +22,32 @@ class TestMockConnection:
         assert not conn.connected
 
     def test_db_read_size(self):
-        conn = MockS7Connection(cabin_count=26, cabin_size=18)
+        conn = MockS7Connection(cabin_count=26, cabin_size=20)
         conn.connect()
-        data = conn.db_read(9, 0, 26 * 18)
-        assert len(data) == 468  # 26 cabins * 18 bytes
+        data = conn.db_read(9, 0, 26 * 20)
+        assert len(data) == 520  # 26 cabins * 20 bytes
 
     def test_db_read_structure(self):
-        """Verify that each 18-byte chunk can be parsed."""
+        """Verify that each 20-byte chunk can be parsed."""
         import struct
-        conn = MockS7Connection(cabin_count=2, cabin_size=18)
+        conn = MockS7Connection(cabin_count=2, cabin_size=20)
         conn.connect()
-        data = conn.db_read(9, 0, 36)
-        # Parse first cabin
+        data = conn.db_read(9, 0, 40)
+        # Parse first cabin (20 bytes)
         rt_ai = struct.unpack_from(">h", data, 0)[0]
         rt_pressure = struct.unpack_from(">f", data, 2)[0]
         rt_position = struct.unpack_from(">h", data, 6)[0]
         rt_angle = struct.unpack_from(">f", data, 8)[0]
-        bool_byte = data[12]
-        health = struct.unpack_from(">f", data, 14)[0]
+        bool_byte_12 = data[12]                                # AI flags
+        cabin_health = struct.unpack_from(">f", data, 14)[0]   # REAL
+        bool_byte_18 = data[18]                                # leakValveStatus
         assert isinstance(rt_ai, int)
         assert isinstance(rt_pressure, float)
-        assert 0.0 <= health <= 1.0
+        assert isinstance(rt_angle, float)
+        assert isinstance(cabin_health, float)
+        # flags byte is one of 0x00 / 0x01 / 0x02 / 0x03
+        assert 0 <= bool_byte_12 <= 0x03
+        assert 0 <= bool_byte_18 <= 0x03
 
 
 class TestPollingEngine:
@@ -61,13 +67,13 @@ class TestPollingEngine:
         frame = engine.get_latest_frame()
         assert frame is not None
         assert len(frame.cabins) == 26
-        # Verify new fields exist
         cabin = frame.cabins[0]
-        assert hasattr(cabin, "leak_result_ai")
-        assert hasattr(cabin, "leak_result_plc")
-        assert hasattr(cabin, "cabin_health_status")
-        assert isinstance(cabin.leak_result_ai, bool)
-        assert isinstance(cabin.cabin_health_status, float)
+        # Verify CabinFrame schema (v2.5)
+        assert hasattr(cabin, "rt_pressure")
+        assert hasattr(cabin, "rt_angle")
+        assert hasattr(cabin, "leak_valve_status")
+        assert isinstance(cabin.leak_valve_status, bool)
+        assert isinstance(cabin.rt_pressure, float)
         engine.stop()
 
     def test_drain_frames(self, plc_cfg):

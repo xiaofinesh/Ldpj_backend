@@ -59,7 +59,10 @@ class ProcessingLoop:
         self._health = health_checker
         self._reporter = fault_reporter
 
-        self._threshold = runtime_cfg.get("threshold", 0.25)
+        # Threshold lives under model_inference.threshold in runtime.yaml;
+        # fall back to top-level "threshold" for backward compatibility.
+        mi_cfg = runtime_cfg.get("model_inference", {}) or {}
+        self._threshold = mi_cfg.get("threshold", runtime_cfg.get("threshold", 0.25))
         self._feature_mode = runtime_cfg.get("feature_mode", "7d")
         self._loop_interval = runtime_cfg.get("loop_interval", 0.05)
         self._no_bottle_threshold = runtime_cfg.get("no_bottle_threshold", 50.0)
@@ -214,8 +217,10 @@ class ProcessingLoop:
         fsm.reset()
 
     def _handle_fault(self, cabin_id: int) -> None:
+        # Per-cycle FAULT (e.g. collection timeout) is recoverable and common
+        # (empty position, transient comms hiccup). Log + reset; persistent
+        # stuck cabins are tracked separately by HealthChecker._check_fsm via F009.
         logger.warning("Cabin %d in FAULT state, resetting", cabin_id)
-        self._reporter.raise_fault("F009", f"舱室 {cabin_id} 状态机故障")
         self._fsm.fsms[cabin_id].clear_fault()
 
     def get_diagnostics(self) -> Dict[str, Any]:

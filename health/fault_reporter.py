@@ -71,9 +71,19 @@ class FaultReporter:
     def has_critical(self) -> bool:
         return any(e.fault.level == FaultLevel.CRITICAL for e in self._active_faults.values())
 
+    # Severity ranking for fault levels (higher = more severe)
+    _SEVERITY = {FaultLevel.INFO: 0, FaultLevel.WARNING: 1,
+                 FaultLevel.ERROR: 2, FaultLevel.CRITICAL: 3}
+
     def get_highest_plc_value(self) -> int:
+        """Return plc_value of the most severe active fault (CRITICAL > ERROR > WARNING > INFO).
+
+        Lower numeric plc_value does NOT mean lower severity — codes are arbitrary IDs.
+        """
         if not self._active_faults: return 0
-        return max(e.fault.plc_value for e in self._active_faults.values())
+        most_severe = max(self._active_faults.values(),
+                          key=lambda e: self._SEVERITY.get(e.fault.level, 0))
+        return most_severe.fault.plc_value
 
     def summary(self) -> Dict[str, Any]:
         return {"active_count": len(self._active_faults), "has_critical": self.has_critical,
