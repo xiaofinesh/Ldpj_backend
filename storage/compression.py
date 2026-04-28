@@ -26,9 +26,12 @@ from typing import List, Optional
 import numpy as np
 
 
-# zlib level: 1 (fastest) to 9 (best). 6 is the default and works well
-# for smooth-curve data.
-COMPRESSION_LEVEL = 6
+# zlib level: 1 (fastest) to 9 (best). For float32 with high-entropy
+# mantissa (the realistic case for noisy pressure curves), levels 1 and 6
+# achieve nearly identical compression ratios — but level 1 is roughly
+# 2–3× faster on the encode side. We're on a write-heavy hot path
+# (one log_record per cycle per cabin), so favor speed.
+COMPRESSION_LEVEL = 1
 
 
 def compress_float_array(values: Optional[List[float]]) -> Optional[bytes]:

@@ -195,3 +195,28 @@ class DatabaseLogger:
     def get_db_size_mb(self) -> float:
         try: return os.path.getsize(self._db_path) / (1024 * 1024)
         except Exception: return 0.0
+
+    def iter_records_raw(self, sql: str, params: List[Any]):
+        """Yield rows for a custom SELECT, releasing the lock between rows.
+
+        Used by ``data_exporter.export_to_csv`` so a long-running scan does
+        NOT monopolize the write lock for the whole scan. With Python's
+        sqlite3, the single connection still serializes individual
+        operations, but releasing between rows lets concurrent
+        ``log_record`` calls slip in instead of blocking for seconds.
+
+        The query and column metadata are read once under lock; subsequent
+        ``fetchone`` calls each acquire-and-release the lock briefly.
+        """
+        with self._lock:
+            try:
+                cur = self._conn.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+            except Exception as exc:
+                raise StorageError(f"iter_records_raw setup failed: {exc}") from exc
+        while True:
+            with self._lock:
+                row = cur.fetchone()
+            if row is None:
+                return
+            yield dict(zip(cols, row))

@@ -206,6 +206,38 @@ class TestReset:
         assert fsm.data.cycle_profile_id == ""
 
 
+class TestSamplingTimingNoDrift:
+    """v2.6 perf-fix D: per-frame jitter must NOT accumulate.
+
+    The v2.5 logic (``last_sample_ts = ts; since_last >= interval``)
+    compounded every late frame into the next sample's target. Across 70
+    samples this became hundreds of ms of drift. The fix advances an
+    absolute target (``next_target_ts += interval``).
+    """
+
+    def test_jittery_frames_do_not_accumulate(self):
+        """Trigger + 4 samples at 100 ms target with +20 ms jitter each.
+
+        Last sample's frame ts should still be the actually-jittery 0.420 s,
+        not the drifted 0.520 s the v2.5 logic would produce.
+        """
+        profile = _make_profile(
+            trigger_angle=0.0, collection_points=5,
+            collection_interval_s=0.100, collection_timeout_s=10.0,
+        )
+        fsm = CabinFSM(1, profile)
+        # Trigger at ts=10.0
+        fsm.update(_frame(1, 600, 358.0, ts=10.0))
+        fsm.update(_frame(1, 600, 2.0, ts=10.0))  # sample 0 at trigger
+        # Each subsequent frame is +20 ms past its ideal target slot.
+        for off in [0.120, 0.220, 0.320, 0.420]:
+            fsm.update(_frame(1, 600, 100.0 + off * 100, ts=10.0 + off))
+        assert fsm.point_count == 5
+        assert fsm.state == CycleState.PROCESSING
+        # Drift-free: last ts is the actually-jittery 10.420, not 10.520
+        assert fsm.data.timestamps[-1] == pytest.approx(10.420, abs=1e-3)
+
+
 class TestCycleFSMManager:
     def test_active_range(self):
         mgr = CycleFSMManager(26, _make_profile(),

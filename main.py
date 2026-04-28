@@ -90,9 +90,14 @@ class StatusReporter:
         polls = self._poller.stats.get("total_polls", 0)
         errs = self._poller.stats.get("errors", 0)
         faults = len(self._faults.active_faults)
-        print(f"\n[{time.strftime('%H:%M:%S')}] {state} | PLC:{plc} | "
-              f"模型:{mdl} | 轮询:{polls} 错误:{errs} | "
-              f"记录:{records} | 故障:{faults}")
+        # The console line bypasses the logging filter on purpose so the
+        # operator sees a periodic heartbeat in normal mode (where the
+        # console handler suppresses INFO). The mirror to the file logger
+        # captures the same heartbeat in ldpj_backend.log for postmortems.
+        msg = (f"{state} | PLC:{plc} | 模型:{mdl} | "
+               f"轮询:{polls} 错误:{errs} | 记录:{records} | 故障:{faults}")
+        print(f"\n[{time.strftime('%H:%M:%S')}] {msg}")
+        logger.info("status: %s", msg)
 
 
 # ── UI ─────────────────────────────────────────────────────────────────

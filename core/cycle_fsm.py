@@ -70,7 +70,12 @@ class CabinFSM:
         self._state = CycleState.IDLE
         self._data = CycleData()
         self._last_angle: Optional[float] = None
-        self._last_sample_ts: float = 0.0
+        # Absolute timestamp at which the *next* sample should be taken.
+        # Updated by += interval (NOT = ts + interval), so per-frame jitter
+        # does NOT accumulate across the 70-point window. This is the
+        # canonical fix for the v2.5 sampling-drift symptom (cumulative
+        # delay of several hundred ms over a long collection).
+        self._next_target_ts: float = 0.0
 
     # -- public interface ----------------------------------------------------
 
@@ -107,7 +112,7 @@ class CabinFSM:
         self._state = CycleState.IDLE
         self._data = CycleData()
         self._last_angle = None
-        self._last_sample_ts = 0.0
+        self._next_target_ts = 0.0
         logger.debug("Cabin %d FSM reset to IDLE", self.cabin_id)
 
     def force_fault(self, reason: str = "") -> None:
@@ -152,21 +157,24 @@ class CabinFSM:
             cycle_profile_id=self._profile.profile_id,
         )
         self._append(frame)
-        self._last_sample_ts = ts
+        # Sample 0 lands at the trigger; sample 1 targets trigger + interval.
+        self._next_target_ts = ts + self._profile.collection_interval_s
         logger.info(
             "Cabin %d: IDLE -> COLLECTING (trigger=%.1f°, %.1f° -> %.1f°)",
             self.cabin_id, trigger, self._last_angle, angle,
         )
 
     def _handle_collecting(self, angle: float, ts: float, frame: CabinFrame) -> None:
-        """Collect samples at regular intervals until target count or wrap-back."""
+        """Collect samples on absolute target ticks until full or wrap-back.
+
+        ``_next_target_ts`` is advanced by += interval (not = ts + interval),
+        so per-frame jitter does NOT accumulate across the 70-point window.
+        """
         elapsed = ts - self._data.start_time
 
-        # Sample at interval (since_last >= interval)
-        since_last = ts - self._last_sample_ts
-        if since_last >= self._profile.collection_interval_s:
+        if ts >= self._next_target_ts:
             self._append(frame)
-            self._last_sample_ts = ts
+            self._next_target_ts += self._profile.collection_interval_s
 
         target_points = self._profile.collection_points
         n_collected = len(self._data.pressures)

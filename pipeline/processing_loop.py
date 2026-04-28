@@ -115,7 +115,9 @@ class ProcessingLoop:
         self._running = False
         self._paused = False
         self._watchdog = True
-        self._last_poll_ts = 0.0
+        # Seq cursor into the polling engine's frame buffer. -1 means
+        # "no frames seen yet" (the engine's first frame has seq=0).
+        self._last_poll_seq = -1
 
         # Surface model availability at construction time (one-shot fault).
         # HealthChecker.run_all_checks() also raises/resolves F002 dynamically.
@@ -188,13 +190,13 @@ class ProcessingLoop:
     # ── Internals ─────────────────────────────────────────────
 
     def _feed_fsm(self) -> None:
-        frames = self._poller.drain_frames_since(self._last_poll_ts)
+        frames = self._poller.drain_frames_since_seq(self._last_poll_seq)
         if not frames:
             return
         for frame in frames:
             cabin_map = {c.cabin_index: c for c in frame.cabins}
             self._fsm.update_all(cabin_map)
-        self._last_poll_ts = frames[-1].timestamp
+        self._last_poll_seq = frames[-1].seq
 
     def _q_threshold_for(self, product_id: str) -> Optional[float]:
         """Look up Q_threshold for the active product, or None if absent."""
@@ -436,7 +438,7 @@ class ProcessingLoop:
             "a_resolution": self._a_resolution,
             "m_disagreement_threshold": self._m_disagreement_threshold,
             "current_product_id": self._current_product_id,
-            "last_poll_ts": self._last_poll_ts,
+            "last_poll_seq": self._last_poll_seq,
             "poller_buffer": self._poller.buffer_length,
             "poller_stats": self._poller.stats,
             "cabin_states": cabin_states,
