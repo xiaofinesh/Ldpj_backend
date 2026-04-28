@@ -22,6 +22,11 @@ checks:
   fsm_stuck:
     enabled: true
     max_stuck_duration_s: 120
+  database:
+    # F007 fires when DB exceeds warn_fraction × max_size_mb (default 0.9 × 1000 = 900 MB).
+    # Tune to fit edge-device storage + retention policy.
+    max_size_mb: 1000
+    warn_fraction: 0.9
 
 fault_report:
   log_to_file: true

@@ -68,12 +68,21 @@ class DatabaseLogger:
             raise StorageError(f"Database init failed: {exc}") from exc
 
     def _run_migrations(self) -> None:
-        """Add new columns to existing databases (idempotent)."""
+        """Add new columns to existing databases (idempotent).
+
+        Matches "duplicate column name" specifically so other operational
+        errors (disk full, syntax error in a future migration, etc.) are
+        NOT silently swallowed.
+        """
         for sql in _MIGRATIONS:
             try:
                 self._conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" in str(exc).lower():
+                    continue
+                logger.error("Migration failed (NOT 'column exists'): %s — %s",
+                             sql, exc)
+                raise
 
     def close(self) -> None:
         if self._conn:
@@ -142,7 +151,11 @@ class DatabaseLogger:
             if label is not None: clauses.append("label = ?"); params.append(label)
             where = " AND ".join(clauses) if clauses else "1=1"
             sql = (f"SELECT id,batch_id,cavity_id,timestamp,label,probability,"
-                   f"confidence,model_version,duration_s,point_count,created_at "
+                   f"confidence,model_version,duration_s,point_count,created_at,"
+                   # v2.6 fields — surface Q values + quality without forcing
+                   # callers to fetch each record's full detail.
+                   f"q_est,q_threshold,q_uncertainty,m1_q,m2_q,"
+                   f"m_disagreement,product_id,cycle_profile_id,quality_flags "
                    f"FROM test_records WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?")
             params.extend([limit, offset])
             try:

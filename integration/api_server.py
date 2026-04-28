@@ -8,7 +8,7 @@ from fastapi.security import APIKeyHeader
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Ldpj_backend API", version="2.4.0")
+app = FastAPI(title="Ldpj_backend API", version="2.6.2")
 
 _refs: Dict[str, Any] = {"db_logger": None, "health_checker": None, "polling_engine": None,
                           "model": None, "fault_reporter": None, "api_key": "change-me"}
@@ -35,7 +35,10 @@ def get_records(start_time: Optional[str] = None, end_time: Optional[str] = None
 def get_record_detail(record_id: int):
     db = _refs.get("db_logger")
     if not db: raise HTTPException(503, "Database not available")
-    record = db.query_record_detail(record_id)
+    # Use get_full_record so the response has decoded `pressures`/`angles`
+    # lists and the BLOB columns are stripped — query_record_detail leaves
+    # the BLOBs in place, which FastAPI cannot JSON-serialize.
+    record = db.get_full_record(record_id)
     if not record: raise HTTPException(404, "Not found")
     return record
 

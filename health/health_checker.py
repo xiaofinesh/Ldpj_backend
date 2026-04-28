@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import logging, os, shutil, threading, time
+from pathlib import Path
 from typing import Any, Dict, Optional
 from health.fault_reporter import FaultReporter
 
@@ -80,12 +81,19 @@ class HealthChecker:
         cfg = self._checks_cfg.get("disk_space", {})
         if not cfg.get("enabled", True): return {"status": "SKIP"}
         min_free = cfg.get("min_free_mb", 100)
+        # Check the partition that holds the database, not the root partition.
+        # On systems where /var or /opt is on a separate mount this is what
+        # actually fills up first; the root partition free space is irrelevant.
+        target = Path(self._db_logger._db_path).resolve().parent if self._db_logger else Path("/")
+        if not target.exists():
+            target = Path("/")
         try:
-            free_mb = shutil.disk_usage("/").free / (1024*1024)
+            free_mb = shutil.disk_usage(target).free / (1024 * 1024)
             ok = free_mb >= min_free
-            if not ok: self._reporter.raise_fault("F005", f"磁盘剩余{free_mb:.0f}MB")
+            if not ok: self._reporter.raise_fault("F005", f"磁盘剩余{free_mb:.0f}MB ({target})")
             else: self._reporter.resolve_fault("F005")
-            return {"status": "OK" if ok else "FAIL", "free_mb": round(free_mb, 1)}
+            return {"status": "OK" if ok else "FAIL",
+                    "free_mb": round(free_mb, 1), "path": str(target)}
         except Exception as exc:
             return {"status": "ERROR", "error": str(exc)}
 
@@ -110,18 +118,34 @@ class HealthChecker:
         max_stuck = cfg.get("max_stuck_duration_s", 120)
         stuck = []
         from core.cycle_fsm import CycleState
+        # FSM start_time is in monotonic seconds (see cycle_fsm docstring),
+        # so the elapsed comparison must use time.monotonic() — not
+        # time.time() (which differs by ~1.7e9 since they're different epochs).
+        now_mono = time.monotonic()
         for cid, fsm in self._fsm_manager.fsms.items():
             if fsm.state == CycleState.COLLECTING:
-                elapsed = time.time() - fsm.data.start_time if fsm.data.start_time else 0
+                elapsed = now_mono - fsm.data.start_time if fsm.data.start_time else 0
                 if elapsed > max_stuck: stuck.append(cid)
         if stuck: self._reporter.raise_fault("F009", f"舱室{stuck}卡死")
         else: self._reporter.resolve_fault("F009")
         return {"status": "OK" if not stuck else "WARN", "stuck_cabins": stuck}
 
     def _check_database(self):
+        cfg = self._checks_cfg.get("database", {})
         if not self._db_logger: return {"status": "SKIP"}
         size_mb = self._db_logger.get_db_size_mb()
         count = self._db_logger.count_records()
-        if size_mb > 450: self._reporter.raise_fault("F007", f"数据库{size_mb:.0f}MB")
-        else: self._reporter.resolve_fault("F007")
-        return {"status": "OK", "size_mb": round(size_mb, 1), "record_count": count}
+        # Threshold: warn at 90% of configured max_size_mb (default 1000 MB).
+        # Reading the limit from health.yaml lets ops tune without a code
+        # change; previously this was hardcoded to 450 MB and ignored
+        # runtime.yaml::database.max_size_mb.
+        max_mb = float(cfg.get("max_size_mb", 1000))
+        warn_at_mb = max_mb * float(cfg.get("warn_fraction", 0.9))
+        if size_mb > warn_at_mb:
+            self._reporter.raise_fault(
+                "F007", f"数据库 {size_mb:.0f}MB 超过 {warn_at_mb:.0f}MB 警戒线",
+            )
+        else:
+            self._reporter.resolve_fault("F007")
+        return {"status": "OK", "size_mb": round(size_mb, 1),
+                "warn_at_mb": round(warn_at_mb, 1), "record_count": count}

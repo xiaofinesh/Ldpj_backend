@@ -1,13 +1,10 @@
-# 运行时参数配置 (v2.6)
+# 运行时参数配置 (v2.6.2)
 #
 # 压力标度: 0 = 常压, ~600 = 满真空 (正值真空度)
 # 角度标度: RT_Angle 0~360°, 每工位 14.4°
 #
 # v2.6 引入"配方系统"(cycle_profiles): 一个 profile 描述特定产量档位下的全部时序参数。
 # 当前只填一档(13000 瓶/小时,周期 6900ms),未来可扩展或改为从 PLC 读取。
-#
-# 任务 1 阶段: 同时保留旧的 cycle_detection 段(由 FSM 读取),与新的 cycle_profiles 并存。
-# 任务 2 完成后, cycle_detection 整段废弃,FSM 改读 CycleProfile 对象。
 
 logging:
   level: INFO
@@ -23,7 +20,7 @@ logging:
 # label = -1: N/A  (模型未加载或异常)
 # label = -2: NO_BOTTLE (无瓶子, max < 50)
 
-# ── 周期配方系统 (v2.6 新增) ────────────────────────────────
+# ── 周期配方系统 ────────────────────────────────────────────
 active_profile: "bph_13000"
 
 cycle_profiles:
@@ -34,7 +31,7 @@ cycle_profiles:
 
     # 5 段角度边界(°),按转盘 0°~360° 划分
     # 段名 → [起始角度, 结束角度)
-    # 边界来自 131808 真实数据 4 个转折点的 mode (135° 收敛点附近):
+    # 边界来自 131808 真实数据 4 个转折点的 mode:
     #   evac_start mode  = 75°    (压力首次脱离 0)
     #   plateau_start    = 90°    (真空到达平台)
     #   release_start    = 290°   (平台末端开始下降)
@@ -60,40 +57,19 @@ cycle_profiles:
 
 # ── 模型推理 ──────────────────────────────────────────────────
 model_inference:
-  # v2.5 二分类阈值(任务 8 完成后废弃)
-  threshold: 0.284271
-
-  # v2.6 系统分辨率 A (Pa·m³/s); Q_est 低于 A 时不参与判决
+  # 系统分辨率 A (Pa·m³/s); Q_est 低于 A 时不参与判决
   a_resolution: 1.0e-5
 
-  # v2.6 M1/M2 不一致告警阈值(相对差)
+  # M1/M2 不一致告警阈值(相对差)
   m_disagreement_threshold: 0.20
-
-# v2.5 兼容字段
-feature_mode: "7d"
-feature_order_7d:
-  - max
-  - min
-  - difference
-  - average
-  - variance
-  - trend_slope
-  - cavity_id
 
 # 无瓶子判定: 压力最大值 < 此阈值 → label=-2, 跳过推理
 no_bottle_threshold: 50.0
 
-# ── 测试周期检测 (v2.5 旧版, 任务 2 后废弃) ────────────────
-# 任务 1 阶段保留, FSM 仍按这套参数运行
-cycle_detection:
-  start_angle: 100.0
-  collection_points: 15
-  collection_interval_s: 0.1
-  collection_timeout_s: 8.0
-
 # ── 数据库 ──────────────────────────────────────────────────
 database:
   path: ldpj_data.db
+  # 占位值; HealthChecker 实际从 health.yaml::checks.database.max_size_mb 读取容量阈值
   max_size_mb: 1000
 
 # ── 主循环 ──────────────────────────────────────────────────

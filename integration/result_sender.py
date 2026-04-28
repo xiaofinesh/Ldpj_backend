@@ -58,6 +58,7 @@ class ResultSender:
         cabin_cfg = plc_cfg.get("cabin_array", {})
         self._db_number = cabin_cfg.get("db_number", 9)
         self._start_offset = cabin_cfg.get("start_offset", 0)
+        self._cabin_count = cabin_cfg.get("cabin_count", 26)
         self._cabin_size = cabin_cfg.get("cabin_size_bytes", 20)
         self._active_start = cabin_cfg.get("active_start", 1)
         self._active_end = cabin_cfg.get("active_end", 25)
@@ -66,9 +67,13 @@ class ResultSender:
         self._result_ai_offset = wb.get("leak_result_ai_offset", 12)
         self._health_offset = wb.get("cabin_health_offset", 14)
 
+        # Fault-code byte sits right after the cabin array unless explicitly
+        # placed elsewhere via plc.yaml::fault_write.byte_offset. Deriving
+        # the default keeps it in sync if cabin_count or cabin_size change.
         fw = plc_cfg.get("fault_write", {})
-        self._fw_db = fw.get("db_number", 9)
-        self._fw_offset = fw.get("byte_offset", 520)
+        derived_offset = self._start_offset + self._cabin_count * self._cabin_size
+        self._fw_db = fw.get("db_number", self._db_number)
+        self._fw_offset = fw.get("byte_offset", derived_offset)
 
         # Async writeback state
         self._async_enabled = False
@@ -159,7 +164,7 @@ class ResultSender:
         with self._write_lock:
             try:
                 data = struct.pack(">h", plc_value)
-                self._polling_engine._conn.db_write(
+                self._polling_engine.connection.db_write(
                     self._fw_db, self._fw_offset, bytearray(data),
                 )
                 logger.debug("Fault code written to PLC: %d", plc_value)
@@ -204,8 +209,11 @@ class ResultSender:
 
         Failures on individual cabins are logged but do not stop the loop;
         the writer keeps going so a transient comm error on one cabin
-        doesn't starve the others.
+        doesn't starve the others. Repeated failures are rate-limited
+        per-cabin so a stuck PLC doesn't drown the log.
         """
+        from core.rate_limit import warn_throttled
+
         snap = self._drain_pending_snapshot()
         if not snap:
             return
@@ -217,8 +225,11 @@ class ResultSender:
                 self._stats["written"] += 1
             except PLCWriteError as exc:
                 self._stats["failed"] += 1
-                logger.warning("Async writeback failed for cabin %d: %s",
-                               cabin_id, exc)
+                warn_throttled(
+                    f"result_sender.async_fail.cabin{cabin_id}",
+                    "Async writeback failed for cabin %d: %s",
+                    cabin_id, exc,
+                )
 
     def _write_result_sync(self, cabin_id: int, label: int, q_est: float) -> None:
         """Read-modify-write the cabin's 8-byte writeback block.
@@ -230,7 +241,7 @@ class ResultSender:
         write_addr = base + self._result_ai_offset
 
         with self._write_lock:
-            conn = self._polling_engine._conn
+            conn = self._polling_engine.connection
             try:
                 current = conn.db_read(self._db_number, write_addr, 8)
                 buf = bytearray(current)

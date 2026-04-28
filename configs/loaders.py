@@ -16,14 +16,23 @@ _BASE_DIR = Path(__file__).resolve().parent
 
 
 def load_yaml(path: str | Path) -> Dict[str, Any]:
+    """Load a yaml config file as a dict.
+
+    Returns ``{}`` only when the file is missing — that's a graceful
+    degradation case (system can boot with defaults). YAML syntax errors
+    or other exceptions ARE re-raised so a typo doesn't cause the system
+    to silently boot with completely empty config (which used to happen
+    in v2.6.1: a single misplaced colon → empty dict → all defaults →
+    confusing downstream behavior). Callers should treat raised
+    exceptions as a startup blocker.
+    """
     p = Path(path)
     if not p.is_absolute():
         p = _BASE_DIR / p
-    try:
-        with open(p, "r", encoding="utf-8") as fh:
-            return yaml.safe_load(fh) or {}
-    except Exception:
+    if not p.exists():
         return {}
+    with open(p, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
 
 
 def load_plc_config() -> Dict[str, Any]:

@@ -26,12 +26,28 @@ class AlarmPusher:
         if not self._enabled or not self.should_push(level): return
         payload = {"source": "ldpj_backend", "fault_code": fault_code,
                    "message": message, "level": level, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        # NOTE: spawning a daemon thread per alarm is acceptable for fault
+        # events (FaultReporter deduplicates so each code is at most one
+        # in-flight push) and for LEAK events (operator wants per-cabin
+        # visibility). If alarm volume ever exceeds ~50/s — switch to a
+        # single worker + queue pattern.
         t = threading.Thread(target=self._send_to_all, args=(payload,), daemon=True)
         t.start()
 
-    def push_leak_alarm(self, cavity_id: int, probability: float) -> None:
+    def push_leak_alarm(self, cavity_id: int, q_est: float) -> None:
+        """Push a LEAK alarm for one cabin.
+
+        v2.6 semantic: the second parameter is the estimated leak rate
+        ``Q_est`` in Pa·m³/s, NOT a probability. Earlier v2.5 callers
+        passed probability ∈ [0,1]; the message used to say '概率='. We
+        now display Q in scientific notation and label it correctly.
+        """
         if not self._push_on_leak: return
-        self.push_alarm("LEAK", f"舱室 {cavity_id} 检测到漏液 (概率={probability:.4f})", "ERROR")
+        self.push_alarm(
+            "LEAK",
+            f"舱室 {cavity_id} 检测到漏液 (漏率 Q={q_est:.3e} Pa·m³/s)",
+            "ERROR",
+        )
 
     def _send_to_all(self, payload):
         for target in self._targets:

@@ -211,7 +211,7 @@ class ProcessingLoop:
     def _predict_q(
         self,
         feats: Dict[str, float],
-        feature_vector_43d: List[float],
+        feature_vector_36d: List[float],
         cabin_id: int,
     ) -> Dict[str, Any]:
         """Run M1 + M2 and fuse. Returns a dict with q_est, m1_q, m2_q,
@@ -233,6 +233,16 @@ class ProcessingLoop:
         m1_q = float(m1_result["q_est"])
         m1_calibrated = bool(m1_result["cabin_calibrated"])
 
+        # Negative q_est is physically impossible (would mean pressure rising
+        # during hold) but can happen due to fit noise around zero. Below
+        # the resolution check will treat |m1_q| anyway; we just log it.
+        if m1_q < 0 and abs(m1_q) > self._a_resolution:
+            logger.debug(
+                "Cabin %d: M1 returned negative Q=%.3e (slope=%.3e). "
+                "Likely a noisy fit near zero; treated as no-leak.",
+                cabin_id, m1_q, primary_slope,
+            )
+
         # F011 (uncalibrated cabin): only raise if cabins.yaml also says so,
         # to avoid double-reporting when M1 just hasn't been retrained yet.
         if not m1_calibrated and not is_cabin_calibrated(self._cabins_cfg, cabin_id):
@@ -242,7 +252,7 @@ class ProcessingLoop:
         m2_q: Optional[float] = None
         if self._m2.loaded:
             try:
-                m2_result = self._m2.predict(feature_vector_43d)
+                m2_result = self._m2.predict(feature_vector_36d)
                 if m2_result["valid"]:
                     m2_q = float(m2_result["q_est"])
             except Exception as exc:
@@ -426,12 +436,17 @@ class ProcessingLoop:
 
     @staticmethod
     def _confidence_from_q(q_result: Dict[str, Any]) -> float:
-        """Map relative_uncertainty (0..1+) into a confidence score (0..1)."""
-        rel = q_result.get("q_uncertainty", float("inf"))
+        """Map (1-σ absolute uncertainty / |q_est|) into a confidence score [0,1].
+
+        High relative uncertainty → low confidence, and vice versa. The
+        ``q_uncertainty`` field carries the *absolute* 1-σ value (Pa·m³/s);
+        we divide by |q_est| here to get the relative form.
+        """
+        unc_abs = q_result.get("q_uncertainty", float("inf"))
         q = q_result.get("q_est", 0.0) or 1.0
-        if rel == float("inf") or abs(q) < 1e-12:
+        if unc_abs == float("inf") or abs(q) < 1e-12:
             return 0.0
-        rel_unc = abs(rel) / abs(q)
+        rel_unc = abs(unc_abs) / abs(q)
         return float(max(0.0, min(1.0, 1.0 - rel_unc)))
 
     def _handle_fault(self, cabin_id: int) -> None:
