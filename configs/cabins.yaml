@@ -37,6 +37,6 @@ cabins:
 
 # 默认值: 当某 cabin 未标定时使用 (V_cabin 占位值)
 default:
-  v_cabin: 3.50e-4
-  u_v_cabin: 1.0e-5
+  v_cabin: 2.15e-4
+  u_v_cabin: 4.0e-6
   notes: "fallback for uncalibrated cabin"
