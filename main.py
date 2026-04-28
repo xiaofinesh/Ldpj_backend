@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ldpj_backend v2.5 – Edge AI leak-detection backend system.
+"""Ldpj_backend v2.6.1 – Edge AI leak-detection backend system.
 
 Startup flow:
   1. Load configs, init subsystems, auto-start processing
@@ -110,7 +110,7 @@ def _print_banner(mode, plc_connected, model_loaded, model_version,
     cabin_n = active_end - active_start + 1
     print()
     print("=" * 52)
-    print("    Ldpj_backend v2.5 — 漏液检测系统")
+    print("    Ldpj_backend v2.6.1 — 漏液检测系统")
     print("=" * 52)
     print(f"  运行模式:  {mode_str}")
     print(f"  PLC状态:   {plc_str}")
