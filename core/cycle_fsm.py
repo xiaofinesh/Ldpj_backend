@@ -60,9 +60,23 @@ class CabinFSM:
     WRAP_FROM_THRESHOLD = 330.0
     WRAP_BACK_THRESHOLD = 30.0
 
-    # Fraction of target_points required for the wrap-back safety net to
-    # accept the cycle. Below this we treat wrap-back as data loss + retrigger.
-    WRAP_BACK_MIN_FRACTION = 0.7
+    @staticmethod
+    def _wrap_back_floor(target_points: int) -> int:
+        """Minimum n_collected for the wrap-back safety net to fire.
+
+        Defined as max(target_points − 3, target_points × 0.95) so:
+          - For typical target=70: floor = 67 (allow at most 3 missing pts)
+          - For tiny test fixtures (target=20): the 95% rule dominates → 19
+          - For target=100: the 3-point rule dominates → 97
+
+        Replaces the v2.5 ``WRAP_BACK_MIN_FRACTION = 0.7`` which fired at
+        ≥ 49 points for target=70. With ~1° angle jitter near the trigger,
+        that 70% rule could end the cycle one sample short of full
+        coverage and produce incomplete features. The new floor is strict
+        enough that wrap-back is a true safety net — only fires when the
+        cycle is essentially complete.
+        """
+        return int(max(target_points - 3, target_points * 0.95))
 
     def __init__(self, cabin_id: int, profile: CycleProfile):
         self.cabin_id = cabin_id
@@ -188,11 +202,12 @@ class CabinFSM:
             return
 
         # ── End condition 2: angle wrap-back (full revolution) ────
-        # Safety net for slightly slow sampling that still completed a cycle.
+        # Safety net: only fire when the cycle is essentially complete
+        # (≤ 3 samples short AND ≥ 95% collected). See _wrap_back_floor.
         if (self._last_angle is not None
                 and self._last_angle >= self.WRAP_FROM_THRESHOLD
                 and angle <= self.WRAP_BACK_THRESHOLD
-                and n_collected >= target_points * self.WRAP_BACK_MIN_FRACTION):
+                and n_collected >= self._wrap_back_floor(target_points)):
             self._data.end_angle = angle
             self._transition_to_processing(
                 f"wrap-back ({n_collected}/{target_points} points)"

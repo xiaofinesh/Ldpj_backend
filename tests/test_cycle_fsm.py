@@ -141,32 +141,60 @@ class TestCollection:
 
 class TestEndConditions:
     def test_wrap_back_below_threshold_does_not_end(self):
-        """If wrap-back happens with < 70% of points, do NOT end (still COLLECTING)."""
-        # target=10, 70% = 7. Collect only 3 then wrap-back.
-        prof = _make_profile(trigger_angle=0.0, collection_points=10,
+        """Wrap-back with n_collected below the floor → keep COLLECTING.
+
+        target=20 → floor = max(17, 19) = 19. The default test profile
+        has interval_s=0, so the wrap-back frame itself also gets
+        appended; we want the post-append count to land at 18 (< floor).
+        Therefore: 1 (trigger) + 16 (loop) + 1 (wrap-back frame) = 18.
+        """
+        prof = _make_profile(trigger_angle=0.0, collection_points=20,
                              collection_timeout_s=100.0)
         fsm = CabinFSM(1, prof)
         fsm.update(_frame(1, 0, 358.0))
-        fsm.update(_frame(1, 0, 2.0))      # 1
-        fsm.update(_frame(1, 600, 50.0))   # 2
-        fsm.update(_frame(1, 600, 100.0))  # 3
-        # Now wrap-back: last=100, current=5 — NOT a wrap-from-330
-        fsm.update(_frame(1, 600, 5.0))    # 4
+        fsm.update(_frame(1, 0, 2.0))    # 1
+        # 16 mid-cycle frames; last_angle ends at 340 (>= 330° trigger)
+        for ang in [10, 50, 80, 100, 120, 150, 170, 190,
+                    210, 230, 250, 270, 290, 310, 330, 340]:
+            fsm.update(_frame(1, 600, ang))
+        fsm.update(_frame(1, 600, 5.0))  # wrap-back attempt; n becomes 18
         assert fsm.state == CycleState.COLLECTING
+        assert fsm.point_count == 18
 
     def test_wrap_back_safety_net_above_threshold(self):
-        """If wrap-back happens after >= 70% of points, accept and PROCESS."""
-        prof = _make_profile(trigger_angle=0.0, collection_points=10,
+        """Wrap-back with n_collected at the floor → transition to PROCESSING.
+
+        target=20 → floor = 19. We arrange post-append count = 19 exactly:
+        1 (trigger) + 17 (loop) + 1 (wrap-back frame) = 19.
+        """
+        prof = _make_profile(trigger_angle=0.0, collection_points=20,
                              collection_timeout_s=100.0)
         fsm = CabinFSM(1, prof)
         fsm.update(_frame(1, 0, 358.0))
-        fsm.update(_frame(1, 0, 2.0))                                 # 1
-        for ang in [50, 100, 150, 200, 250, 300, 340]:                # 8 total
+        fsm.update(_frame(1, 0, 2.0))    # 1
+        # 17 mid-cycle frames; last_angle ends at 345 (>= 330)
+        for ang in [10, 50, 80, 100, 120, 150, 170, 190,
+                    210, 230, 250, 270, 290, 310, 320, 330, 345]:
             fsm.update(_frame(1, 600, ang))
-        # 8 >= 0.7 * 10 = 7, last_angle=340 (>= 330), now wrap-back to 5
-        fsm.update(_frame(1, 600, 5.0))
+        fsm.update(_frame(1, 600, 5.0))  # wrap-back; n becomes 19 == floor
         assert fsm.state == CycleState.PROCESSING
-        assert fsm.point_count >= 7
+        assert fsm.point_count == 19
+
+    def test_wrap_back_floor_for_production_target_70(self):
+        """Pin the formula: max(target − 3, target × 0.95).
+
+        Production-relevant assertion is the first one (target=70 → 67).
+        The other cases ensure the cross-over between the two rules
+        behaves as documented.
+        """
+        # target=70 production: 3-point rule wins
+        assert CabinFSM._wrap_back_floor(70) == 67
+        # Small target: 95% rule wins
+        assert CabinFSM._wrap_back_floor(20) == 19
+        # Large target: 3-point rule wins
+        assert CabinFSM._wrap_back_floor(100) == 97
+        # Cross-over point: at target=60 both rules give 57
+        assert CabinFSM._wrap_back_floor(60) == 57
 
     def test_timeout_to_fault(self):
         """Slow data → timeout → FAULT."""
