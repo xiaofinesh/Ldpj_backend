@@ -229,6 +229,9 @@ def main():
         runtime_cfg.get("database", {}).get("path", "ldpj_data.db"))
 
     result_sender = ResultSender(plc_cfg, polling_engine)
+    # v2.6: async writeback so 25 simultaneous PROCESSING cabins don't
+    # block the polling thread on snap7 RMW.
+    result_sender.enable_async()
 
     health_checker = HealthChecker(health_cfg, fault_reporter)
     # HealthChecker still expects a single `model` reference for F002 — give
@@ -294,6 +297,9 @@ def main():
         print("\n  正在关闭系统...")
         status_reporter.stop()
         proc_loop.stop()
+        # Flush pending writebacks BEFORE polling stops so the writer thread
+        # can still grab _io_lock from a live S7 connection.
+        result_sender.shutdown()
         health_checker.stop()
         api_server.stop()
         polling_engine.stop()
