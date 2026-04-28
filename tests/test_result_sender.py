@@ -67,6 +67,9 @@ class FakeS7Conn:
 def _make_sender(write_delay_s: float = 0.0) -> tuple[ResultSender, FakeS7Conn]:
     conn = FakeS7Conn(write_delay_s=write_delay_s)
     poller = MagicMock()
+    # v2.6.2: ResultSender now uses polling_engine.connection (public property)
+    # instead of polling_engine._conn (private). Mock both for back-compat.
+    poller.connection = conn
     poller._conn = conn
     sender = ResultSender(_plc_cfg(), poller)
     return sender, conn

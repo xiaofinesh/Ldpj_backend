@@ -1,12 +1,21 @@
-"""Finite State Machine for full-cycle data collection (v2.6).
+"""Finite State Machine for full-cycle data collection (v2.6.1).
 
-v2.6 changes vs v2.5:
-- Driven by CycleProfile (typed object) rather than a flat dict
-- Trigger at angle crossing trigger_angle; trigger_angle=0° handled
-  via wrap-around detection (e.g. last=358° -> current=2°)
-- Backup end condition: angle wrap-back after >= 70% of target_points
-  (safety net for slightly slow sampling that still completes a full cycle)
-- CycleData carries cycle_profile_id for traceability into the DB
+Design highlights:
+- Driven by CycleProfile (typed object) rather than a flat dict.
+- Trigger at angle crossing trigger_angle; trigger_angle=0° is handled
+  via wrap-around detection (e.g. last=358° → current=2°).
+- Sampling uses ABSOLUTE target timestamps from a monotonic clock
+  (frame.monotonic, not frame.timestamp). next_target_ts advances by
+  += interval, NOT = ts + interval. This means per-frame jitter does
+  not accumulate across the 70-point window, AND wall-clock NTP jumps
+  cannot disrupt an in-flight collection.
+- Backup end condition: angle wrap-back fires only when n_collected >=
+  ``_wrap_back_floor(target)`` (max(target-3, target*0.95)) — a true
+  safety net rather than the v2.5 70% rule that could end one sample
+  short of full coverage.
+- CycleData carries cycle_profile_id and CycleData.start_time uses
+  monotonic seconds (FSM-internal); DB callers persist wall-clock from
+  frame.timestamp instead.
 """
 
 from __future__ import annotations
@@ -106,9 +115,16 @@ class CabinFSM:
         return len(self._data.pressures)
 
     def update(self, frame: CabinFrame) -> CycleState:
-        """Feed a polling frame and possibly transition state."""
+        """Feed a polling frame and possibly transition state.
+
+        ``ts`` is the monotonic timestamp (NTP-jump safe), used for
+        absolute-target sample scheduling. The wall-clock timestamp on
+        the frame is preserved for downstream DB persistence.
+        """
         angle = frame.rt_angle
-        ts = frame.timestamp
+        # Prefer monotonic when available; fall back to wall-clock for
+        # tests that construct CabinFrame without setting monotonic.
+        ts = frame.monotonic if frame.monotonic else frame.timestamp
 
         if self._state == CycleState.IDLE:
             self._handle_idle(angle, ts, frame)
@@ -225,10 +241,12 @@ class CabinFSM:
 
     def _transition_to_processing(self, reason: str) -> None:
         self._state = CycleState.PROCESSING
+        # start_time is now monotonic (see update()); use the same clock here.
+        elapsed = (time.monotonic() - self._data.start_time
+                   if self._data.start_time else 0)
         logger.info(
             "Cabin %d: COLLECTING -> PROCESSING (%s, %.3fs)",
-            self.cabin_id, reason,
-            time.time() - self._data.start_time if self._data.start_time else 0,
+            self.cabin_id, reason, elapsed,
         )
 
     def _append(self, frame: CabinFrame) -> None:

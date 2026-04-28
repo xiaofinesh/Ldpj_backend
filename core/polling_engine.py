@@ -33,14 +33,16 @@ class CabinFrame:
     rt_position: int
     rt_angle: float
     leak_valve_status: bool
-    timestamp: float
+    timestamp: float           # wall-clock (time.time()) — for DB persistence
+    monotonic: float = 0.0     # time.monotonic() — for FSM scheduling, NTP-jump safe
 
 
 @dataclass
 class PollFrame:
-    timestamp: float
+    timestamp: float           # wall-clock
     cabins: List[CabinFrame] = field(default_factory=list)
-    seq: int = 0   # monotonically increasing across the engine's lifetime
+    seq: int = 0               # monotonically increasing across the engine's lifetime
+    monotonic: float = 0.0     # time.monotonic() captured at the same call as `timestamp`
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +216,8 @@ class MockS7Connection:
             self._angles[i] = (self._angles[i] + 0.51 + random.uniform(-0.03, 0.03)) % 360.0
             angle = self._angles[i]
 
-            # Detect test zone (100°~276°)
-            if 100.0 <= angle <= 276.0:
+            # Detect test zone — match v2.6.1 hold section [90°, 290°)
+            if 90.0 <= angle < 290.0:
                 if not self._in_test[i]:
                     self._in_test[i] = True
                     self._cycle_point[i] = 0
@@ -309,6 +311,15 @@ class PollingEngine:
     @property
     def plc_connected(self) -> bool:
         return self._conn.connected
+
+    @property
+    def connection(self):
+        """Public accessor for the underlying S7 / Mock connection.
+
+        ResultSender (and any other PLC writer) uses this for db_write.
+        Replaces ``polling_engine._conn`` private access.
+        """
+        return self._conn
 
     @property
     def buffer_length(self) -> int:
@@ -432,7 +443,11 @@ class PollingEngine:
             pass
 
     def _parse_frame(self, raw: bytearray) -> PollFrame:
+        # Capture both wall-clock (for DB) and monotonic (for FSM scheduling).
+        # FSM uses monotonic so NTP slewing / jumps don't bork mid-cycle
+        # collection — the wall-clock can be discontinuous, monotonic isn't.
         ts = time.time()
+        mono = time.monotonic()
         cabins: List[CabinFrame] = []
         for i in range(self._cabin_count):
             offset = i * self._cabin_size
@@ -450,5 +465,6 @@ class PollingEngine:
                 rt_angle=struct.unpack_from(">f", chunk, 8)[0],
                 leak_valve_status=leak_valve_status,
                 timestamp=ts,
+                monotonic=mono,
             ))
-        return PollFrame(timestamp=ts, cabins=cabins)
+        return PollFrame(timestamp=ts, cabins=cabins, monotonic=mono)

@@ -189,6 +189,12 @@ def export_to_csv(
     base_cols = [
         "id", "batch_id", "cavity_id", "timestamp", "label", "probability",
         "confidence", "model_version", "duration_s", "point_count",
+        # v2.6 columns — Q regression results + data-quality flags +
+        # active product / cycle profile IDs. Required for diagnostics
+        # and for prepare_q_data when re-deriving training labels.
+        "q_est", "q_threshold", "q_uncertainty",
+        "m1_q", "m2_q", "m_disagreement",
+        "product_id", "cycle_profile_id", "quality_flags",
     ]
     raw_cols = ["pressure_data", "angle_data", "features",
                 "leak_valve_status", "end_angle"]
