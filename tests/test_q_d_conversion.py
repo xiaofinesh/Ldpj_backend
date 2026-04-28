@@ -104,6 +104,35 @@ class TestDispatch:
         assert a > b
 
 
+class TestExtremePressureClampWarning:
+    """The C_d formula clamps to [0.5, 0.95] when the upstream/downstream
+    pressure ratio is unrealistic. The clamp now emits a rate-limited
+    warning so the conversion's degraded state is visible in the log."""
+
+    def test_high_pressure_ratio_logs_clamp_warning(self, caplog):
+        """p_d ≫ p_u → C_d = 0.8623 - 0.2541·(very large) → strongly negative,
+        clamped UP to 0.5. The first occurrence always logs."""
+        from core import q_d_conversion
+        from core.rate_limit import reset_state
+        reset_state()  # clear inter-test rate-limit state
+        with caplog.at_level("WARNING"):
+            cd = q_d_conversion._discharge_coefficient(p_u=1, p_d=10000)
+        assert cd == pytest.approx(0.5)
+        assert any("C_d clamped" in rec.message or "q_d_choked_cd_clamped" in rec.message
+                   for rec in caplog.records)
+
+    def test_normal_pressure_ratio_no_warning(self, caplog):
+        """Within the validity domain → no clamp → no warning."""
+        from core import q_d_conversion
+        from core.rate_limit import reset_state
+        reset_state()
+        with caplog.at_level("WARNING"):
+            cd = q_d_conversion._discharge_coefficient(p_u=101325, p_d=35000)
+        # Raw formula yields ~0.78 — well inside [0.5, 0.95]
+        assert 0.5 < cd < 0.95
+        assert not any("clamped" in rec.message for rec in caplog.records)
+
+
 class TestRelativeMagnitudes:
     """Cross-regime sanity checks. The two formulas live in different regimes
     (l/d > 100 vs l/d < 3) so we don't assert one bounds the other for all d.

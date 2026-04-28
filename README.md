@@ -186,6 +186,10 @@ python scripts/calibrate_v_cabin.py \
 > ⚠️ **HMI 协调要求**：v2.5 时 `cabinHealthStatus` 是概率（0–1）；v2.6
 > 改为漏率 Q（典型 1e-7 ~ 1e-2 Pa·m³/s）。**字节格式不变，但 HMI 显示
 > 逻辑必须同步切换**，否则上线瞬间用户会看到"健康度从 95% 跌到 0.001"。
+>
+> `scripts/install.sh` 与 `scripts/deploy_model.sh` 在实际部署模型前
+> 会强制要求确认 HMI 已就绪。CI / 自动化场景设置 `LDPJ_SKIP_HMI_CONFIRM=1`
+> 可绕过此提示（仅当 HMI 已对齐 Q_est 时使用）。
 
 Cabin[0] 保留. 系统读取 Cabin[1]~Cabin[25].
 

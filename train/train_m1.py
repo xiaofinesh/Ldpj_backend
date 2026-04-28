@@ -152,12 +152,22 @@ def main(argv=None) -> int:
             continue
 
         passed = result["r_squared"] >= args.min_r2
-        result["passes_acceptance"] = bool(passed)
         if not passed:
-            logger.warning("Cabin %d: R²=%.4f < %.2f", cabin_id,
-                           result["r_squared"], args.min_r2)
+            # Strict quality gate: do NOT write rejected cabins to the
+            # output JSON. At inference time, LinearRegressionM1 will
+            # treat the cabin as uncalibrated → fall back to the
+            # global mean and the processing loop raises F011, which is
+            # the intended behavior for sensors that haven't been
+            # successfully calibrated yet.
+            logger.warning(
+                "Cabin %d: R²=%.4f < %.2f — REJECTED, "
+                "will fall back to global mean at inference (F011)",
+                cabin_id, result["r_squared"], args.min_r2,
+            )
             failed.append(int(cabin_id))
+            continue
 
+        result["passes_acceptance"] = True
         cabin_coefs[int(cabin_id)] = result
         logger.info("Cabin %d: β=%.3e α=%.3e R²=%.4f n=%d",
                     cabin_id, result["beta"], result["alpha"],

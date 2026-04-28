@@ -176,6 +176,37 @@ class TestV26CompressionRoundTrip:
         assert raw_text == ""
         assert raw_blob is not None and isinstance(raw_blob, bytes)
 
+    def test_quality_flags_persisted(self, db):
+        """v2.6 perf-fix #4: quality_flags column round-trips through INSERT."""
+        row_id = db.log_record(
+            cavity_id=1, pressures=[100.0, 200.0, 300.0], angles=None,
+            ai_values=None, positions=None, features={},
+            label=1, probability=0.0, confidence=0.0,
+            model_version="v2.6", duration_s=0.0,
+            quality_flags=0xFF,  # all 8 defined bits set
+        )
+        with db._lock:
+            cur = db._conn.execute(
+                "SELECT quality_flags FROM test_records WHERE id=?", (row_id,)
+            )
+            (flags,) = cur.fetchone()
+        assert flags == 0xFF
+
+    def test_quality_flags_default_zero(self, db):
+        """log_record without quality_flags arg writes 0 (no flags set)."""
+        row_id = db.log_record(
+            cavity_id=2, pressures=[1.0, 2.0], angles=None,
+            ai_values=None, positions=None, features={},
+            label=1, probability=0.0, confidence=0.0,
+            model_version="v2.6", duration_s=0.0,
+        )
+        with db._lock:
+            cur = db._conn.execute(
+                "SELECT quality_flags FROM test_records WHERE id=?", (row_id,)
+            )
+            (flags,) = cur.fetchone()
+        assert flags == 0
+
     def test_no_angles_means_null_blob(self, db):
         """When angles=None, the angle BLOB is NULL (not an empty BLOB)."""
         row_id = db.log_record(

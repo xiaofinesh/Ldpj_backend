@@ -139,6 +139,15 @@ def compute_features_v26(
     """
     n = min(len(pressures), len(angles))
     if n < 2:
+        # Surface this rare-but-silent failure mode. Rate-limited so a
+        # stuck cabin (no rotation, no data) doesn't drown the log.
+        from core.rate_limit import warn_throttled
+        warn_throttled(
+            "compute_features_v26.degenerate",
+            "compute_features_v26 received n=%d (< 2) for cabin %d; "
+            "returning zero feats. Likely a comms hiccup or a stuck cabin.",
+            n, cavity_id,
+        )
         feats = {name: 0.0 for name in FEATURE_ORDER_43D}
         feats["cavity_id"] = float(cavity_id)
         return feats

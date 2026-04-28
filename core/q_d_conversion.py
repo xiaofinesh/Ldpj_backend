@@ -97,10 +97,23 @@ def _choked_sqrt_factor(temperature: float = T_REF) -> float:
 
 
 def _discharge_coefficient(p_u: float, p_d: float) -> float:
-    """C_d = 0.8623 − 0.2541·(p_d/p_u). Clamped to [0.5, 0.95] for safety."""
+    """C_d = 0.8623 − 0.2541·(p_d/p_u). Clamped to [0.5, 0.95] for safety.
+
+    When the raw value falls outside [0.5, 0.95] (i.e. unusually extreme
+    pressure ratio), emits a rate-limited warning so the operator can
+    notice that the choked-flow conversion is in degraded territory.
+    """
     p_ratio = p_d / p_u if p_u > 0 else 0.0
-    c_d = 0.8623 - 0.2541 * p_ratio
-    return max(0.5, min(0.95, c_d))
+    raw_c_d = 0.8623 - 0.2541 * p_ratio
+    c_d = max(0.5, min(0.95, raw_c_d))
+    if c_d != raw_c_d:
+        from core.rate_limit import warn_throttled
+        warn_throttled(
+            "q_d_choked_cd_clamped",
+            "Choked-flow C_d clamped from %.3f to %.3f (p_u=%g, p_d=%g)",
+            raw_c_d, c_d, p_u, p_d,
+        )
+    return c_d
 
 
 def d_to_q_choked(

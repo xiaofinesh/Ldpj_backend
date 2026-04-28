@@ -28,6 +28,8 @@ from core.cycle_profile import CycleProfile
 from core.feature_spec import FEATURE_ORDER_43D
 from core.features import compute_features_v26, features_to_vector
 from core.polling_engine import PollingEngine
+from core.quality_flags import QF_SHORT_HOLD, compute_quality_flags
+from core.rate_limit import warn_throttled
 from health.fault_reporter import FaultReporter
 from health.health_checker import HealthChecker
 from integration.alarm_pusher import AlarmPusher
@@ -293,10 +295,22 @@ class ProcessingLoop:
         feature_vector = features_to_vector(feats, mode="43d")
         duration_s = (data.timestamps[-1] - data.timestamps[0]) if len(data.timestamps) > 1 else 0.0
 
+        # ── Per-cycle data-quality bitmask (for DB column) ────
+        quality_flags = compute_quality_flags(feats)
+        if quality_flags & QF_SHORT_HOLD:
+            # hold_trend_slope is M1's only signal; warn (rate-limited) so
+            # operators see when the primary-section data is degraded.
+            warn_throttled(
+                "processing_loop.short_hold",
+                "Cabin %d: hold section had < 2 points; M1 slope unreliable",
+                cabin_id,
+            )
+
         # ── NO_BOTTLE detection: hold-section max < threshold ─
         hold_max = float(feats.get("hold_max", 0.0))
         if hold_max < self._no_bottle_threshold:
-            self._handle_no_bottle(cabin_id, fsm, data, feats, duration_s)
+            self._handle_no_bottle(cabin_id, fsm, data, feats, duration_s,
+                                   quality_flags=quality_flags)
             return
 
         # ── Q inference ───────────────────────────────────────
@@ -354,6 +368,7 @@ class ProcessingLoop:
                 m2_q=q_result.get("m2_q"),
                 m_disagreement=q_result.get("m_disagreement"),
                 product_id=self._current_product_id,
+                quality_flags=quality_flags,
             )
         except Exception as exc:
             logger.error("DB logging failed for cabin %d: %s", cabin_id, exc)
@@ -381,7 +396,8 @@ class ProcessingLoop:
 
         fsm.reset()
 
-    def _handle_no_bottle(self, cabin_id, fsm, data, feats, duration_s) -> None:
+    def _handle_no_bottle(self, cabin_id, fsm, data, feats, duration_s,
+                          quality_flags: int = 0) -> None:
         logger.info("Cabin %d: NO_BOTTLE (hold_max=%.1f < %.1f, points=%d)",
                     cabin_id, feats.get("hold_max", 0.0),
                     self._no_bottle_threshold, len(data.pressures))
@@ -401,6 +417,7 @@ class ProcessingLoop:
                 q_est=0.0, q_threshold=None, q_uncertainty=None,
                 m1_q=0.0, m2_q=None, m_disagreement=0.0,
                 product_id=self._current_product_id,
+                quality_flags=quality_flags,
             )
         except Exception as exc:
             logger.error("DB logging failed for cabin %d: %s", cabin_id, exc)

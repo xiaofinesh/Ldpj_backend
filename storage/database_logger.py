@@ -41,6 +41,10 @@ _MIGRATIONS = [
     "ALTER TABLE test_records ADD COLUMN m2_q REAL",
     "ALTER TABLE test_records ADD COLUMN m_disagreement REAL",
     "ALTER TABLE test_records ADD COLUMN product_id TEXT",
+    # Bitmask flagging silently-degraded computations during this cycle
+    # (short sections, clamped C_d, etc.). See core/quality_flags.py for
+    # the bit layout.
+    "ALTER TABLE test_records ADD COLUMN quality_flags INTEGER DEFAULT 0",
 ]
 
 
@@ -84,7 +88,8 @@ class DatabaseLogger:
                    cycle_profile_id=None,
                    q_est=None, q_threshold=None, q_uncertainty=None,
                    m1_q=None, m2_q=None, m_disagreement=None,
-                   product_id=None) -> int:
+                   product_id=None,
+                   quality_flags: int = 0) -> int:
         """Insert a record. Pressures/angles are auto-compressed to BLOB.
 
         v2.6: pressure_data_compressed and angle_data_compressed carry the
@@ -108,8 +113,8 @@ class DatabaseLogger:
                     "model_version,duration_s,point_count,leak_valve_status,end_angle,"
                     "cycle_profile_id,pressure_data_compressed,angle_data_compressed,"
                     "q_est,q_threshold,q_uncertainty,"
-                    "m1_q,m2_q,m_disagreement,product_id"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "m1_q,m2_q,m_disagreement,product_id,quality_flags"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (batch_id, cavity_id, ts, "",
                      None,
                      json.dumps(ai_values) if ai_values else None,
@@ -120,7 +125,8 @@ class DatabaseLogger:
                      round(end_angle, 2) if end_angle is not None else None,
                      cycle_profile_id, pressure_blob, angle_blob,
                      q_est, q_threshold, q_uncertainty,
-                     m1_q, m2_q, m_disagreement, product_id))
+                     m1_q, m2_q, m_disagreement, product_id,
+                     int(quality_flags) if quality_flags is not None else 0))
                 self._conn.commit()
                 return cur.lastrowid
             except Exception as exc:

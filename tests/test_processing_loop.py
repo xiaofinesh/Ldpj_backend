@@ -439,15 +439,25 @@ class TestDBPersistence:
         with temp_db._lock:
             cur = temp_db._conn.execute(
                 "SELECT label, q_est, q_threshold, m1_q, m2_q, "
-                "m_disagreement, product_id, cycle_profile_id "
+                "m_disagreement, product_id, cycle_profile_id, quality_flags "
                 "FROM test_records WHERE cavity_id = 1"
             )
             row = cur.fetchone()
         assert row is not None
-        label, q_est, q_threshold, m1_q, m2_q, disagreement, product_id, profile_id = row
+        (label, q_est, q_threshold, m1_q, m2_q, disagreement,
+         product_id, profile_id, quality_flags) = row
         assert q_est is not None and q_est > 0
         assert q_threshold == pytest.approx(1e-4)
         assert m1_q == pytest.approx(q_est, rel=1e-9)  # M1 is the primary
         assert m2_q is None  # M2 not loaded
         assert product_id == "TEST"
         assert profile_id == "bph_13000"
+        # The _seed_fsm_with_cycle helper places ALL points in hold (angles
+        # 116°–270°), so the other 5 sections legitimately have count=0
+        # and their bits are set. What MUST NOT be set is the hold bit
+        # itself — the hold section had 40 points, plenty for a stable
+        # slope estimate, which is the whole point of this happy path.
+        from core.quality_flags import QF_SHORT_HOLD, QF_DEGENERATE_INPUT
+        assert quality_flags is not None
+        assert not (quality_flags & QF_SHORT_HOLD)
+        assert not (quality_flags & QF_DEGENERATE_INPUT)

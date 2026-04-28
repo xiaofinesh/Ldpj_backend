@@ -114,6 +114,48 @@ class TestCli:
         data = json.loads(out_json.read_text(encoding="utf-8"))
         assert data["n_cabins_calibrated"] == 0
 
+    def test_rejected_cabin_excluded_from_output(self, tmp_path):
+        """Cabins whose R² falls below --min-r2 must NOT be written to the
+        output JSON. At inference time, predict() on such a cabin must
+        return cabin_calibrated=False so the processing loop's F011 path
+        kicks in (instead of using a low-quality fit)."""
+        # Build a dataset where cabin 3 has heavily corrupted q_measured
+        # so its (slope, q_measured) pairs no longer linear-fit cleanly.
+        df = generate(n_cabins=5, n_rounds=20, seed=42)
+        # Inject random scatter into cabin 3's q_measured to wreck R²
+        rng = np.random.default_rng(0)
+        mask = df["cavity_id"] == 3
+        df.loc[mask, "q_measured"] = rng.uniform(0, 1e-2, size=mask.sum())
+        csv = tmp_path / "tainted.csv"
+        df.to_csv(csv, index=False)
+
+        out_json = tmp_path / "m1.json"
+        rc = train_main([
+            "--data", str(csv),
+            "--output", str(out_json),
+            "--version", "reject_test",
+            "--min-r2", "0.99",
+            "--bootstrap-samples", "50",
+            "--min-samples-per-cabin", "5",
+        ])
+        assert rc == 0
+
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        # Cabin 3 should be rejected; tracked in the failed-acceptance metric
+        assert "3" not in data["cabins"]
+        assert data["n_cabins_failed_acceptance"] >= 1
+        # The other cabins should still be present (rejection is per-cabin,
+        # not all-or-nothing)
+        assert "1" in data["cabins"] or "2" in data["cabins"]
+
+        # Inference round-trip: cabin 3 falls back to global mean
+        cfg = {"m1": {"coefficients_path": str(out_json.relative_to(tmp_path))}}
+        m1 = LinearRegressionM1(cfg, base_dir=tmp_path)
+        m1.load()
+        assert 3 not in m1.calibrated_cabins
+        result = m1.predict(primary_trend_slope=-1.0, cabin_id=3)
+        assert result["cabin_calibrated"] is False  # F011 path
+
     def test_predict_round_trip(self, tmp_path, labeled_csv):
         """Train M1, then call .predict() and check Q_est is finite + positive
         for the same slopes the trainer saw."""
