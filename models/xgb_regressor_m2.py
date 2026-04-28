@@ -1,6 +1,6 @@
 """M2 model — global XGBoost regressor for Q estimation (v2.6).
 
-Input: 43-dim feature vector (or a subset selected during training).
+Input: 36-dim feature vector (or a subset selected during training).
 Output: Q_est in Pa·m³/s.
 
 Training is done in log10(Q) space to handle the wide dynamic range
@@ -16,7 +16,7 @@ Metadata contract (m2_metadata.json):
         "evaluation": {"r_squared": 0.97, "mae": 0.12}
     }
 
-If ``feature_subset`` is missing, the full 43-dim vector is assumed.
+If ``feature_subset`` is missing, the full 36-dim vector is assumed.
 ``log_space=true`` (default) means the booster's output y is interpreted
 as log10(Q); we apply 10**y for the final answer.
 """
@@ -66,9 +66,9 @@ class XGBRegressorM2:
         self._scaler: Any = None
         self._loaded = False
         self._log_space = True
-        # Subset of FEATURE_ORDER_43D actually used by this model
+        # Subset of FEATURE_ORDER_36D actually used by this model
         self._feature_subset: List[str] = []
-        # Indices into the full 43-dim vector (computed at load time)
+        # Indices into the full 36-dim vector (computed at load time)
         self._feature_indices: List[int] = []
 
     # ── public properties ─────────────────────────────────────────
@@ -99,7 +99,7 @@ class XGBRegressorM2:
         ModelLoadError if the model file cannot be opened or metadata is
         inconsistent (e.g. feature_subset references unknown names).
         """
-        from core.feature_spec import FEATURE_ORDER_43D
+        from core.feature_spec import FEATURE_ORDER_36D
 
         try:
             import xgboost as xgb  # local import: training-only env friendly
@@ -120,19 +120,19 @@ class XGBRegressorM2:
                 with open(self._metadata_path, "r", encoding="utf-8") as fh:
                     meta = json.load(fh)
                 self._version = meta.get("version", self._version)
-                self._feature_subset = list(meta.get("feature_subset") or FEATURE_ORDER_43D)
+                self._feature_subset = list(meta.get("feature_subset") or FEATURE_ORDER_36D)
                 self._log_space = bool(meta.get("log_space", True))
             else:
                 logger.warning(
-                    "M2 metadata not found; assuming full 43-dim and log-space"
+                    "M2 metadata not found; assuming full 36-dim and log-space"
                 )
-                self._feature_subset = list(FEATURE_ORDER_43D)
+                self._feature_subset = list(FEATURE_ORDER_36D)
                 self._log_space = True
 
-            # Pre-compute indices into the full 43-dim vector
+            # Pre-compute indices into the full 36-dim vector
             try:
                 self._feature_indices = [
-                    FEATURE_ORDER_43D.index(name) for name in self._feature_subset
+                    FEATURE_ORDER_36D.index(name) for name in self._feature_subset
                 ]
             except ValueError as exc:
                 raise ModelLoadError(
@@ -154,15 +154,15 @@ class XGBRegressorM2:
     # ── inference ────────────────────────────────────────────────
 
     def predict(self, full_features: List[float]) -> Dict[str, Any]:
-        """Predict Q_est from the full 43-dim feature vector.
+        """Predict Q_est from the full 36-dim feature vector.
 
-        The 43-dim contract is enforced; the model internally selects the
+        The 36-dim contract is enforced; the model internally selects the
         ``feature_subset`` dictated by metadata. This keeps callers from
         having to know which features the model uses.
 
         Parameters
         ----------
-        full_features : list of float, length 43
+        full_features : list of float, length 36
 
         Returns
         -------
@@ -174,9 +174,9 @@ class XGBRegressorM2:
         try:
             import xgboost as xgb
 
-            if len(full_features) != 43:
+            if len(full_features) != 36:
                 raise ValueError(
-                    f"M2 expects 43-dim input, got {len(full_features)}"
+                    f"M2 expects 36-dim input, got {len(full_features)}"
                 )
 
             x_subset = np.asarray(

@@ -89,11 +89,11 @@ class TestTrainM2:
         assert 0 < len(m2.feature_subset) <= top_k
         assert m2.log_space is True
 
-        # Predict on a real row's full 43-dim feature vector
-        from core.feature_spec import FEATURE_ORDER_43D
+        # Predict on a real row's full 36-dim feature vector
+        from core.feature_spec import FEATURE_ORDER_36D
         df = pd.read_csv(labeled_csv)
         feats = json.loads(df.iloc[0]["features"])
-        full_vec = [float(feats.get(k, 0.0)) for k in FEATURE_ORDER_43D]
+        full_vec = [float(feats.get(k, 0.0)) for k in FEATURE_ORDER_36D]
         result = m2.predict(full_vec)
         assert result["valid"] is True
         # Q is bounded by log10 clamp

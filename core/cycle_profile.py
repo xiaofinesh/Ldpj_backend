@@ -18,9 +18,15 @@ from typing import Dict, List, Tuple, Any
 logger = logging.getLogger(__name__)
 
 
-# Standard section names (order matters for feature extraction)
+# Standard section names (order matters for feature extraction).
+#
+# v2.6.1 (post-131808 calibration): the v2.6 "stable" segment (93°-115°)
+# was an artifact — real production data shows the trend slope is
+# continuous from the moment vacuum is reached (~90°) all the way to
+# release (~290°). We merged stable into hold, leaving 5 sections.
+# Boundaries below match the modes of the 4 transition points in 131808.
 SECTION_NAMES: List[str] = [
-    "baseline_pre", "evac", "stable", "hold", "release", "baseline_post",
+    "baseline_pre", "evac", "hold", "release", "baseline_post",
 ]
 
 

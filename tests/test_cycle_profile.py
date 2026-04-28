@@ -15,12 +15,11 @@ def _valid_profile_dict():
         "bph": 13000,
         "cycle_total_ms": 6900,
         "sections": {
-            "baseline_pre":  [0.0,   57.6],
-            "evac":          [57.6,  93.0],
-            "stable":        [93.0,  115.0],
-            "hold":          [115.0, 273.6],
-            "release":       [273.6, 302.4],
-            "baseline_post": [302.4, 360.0],
+            "baseline_pre":  [0.0,   75.0],
+            "evac":          [75.0,  90.0],
+            "hold":          [90.0,  290.0],
+            "release":       [290.0, 304.0],
+            "baseline_post": [304.0, 360.0],
         },
         "collection": {
             "trigger_angle": 0.0,
@@ -40,7 +39,7 @@ class TestCycleProfile:
         assert p.collection_points == 70
         assert p.collection_interval_s == pytest.approx(0.1)
         assert p.primary_section == "hold"
-        assert p.sections["hold"] == (115.0, 273.6)
+        assert p.sections["hold"] == (90.0, 290.0)
 
     def test_validate_passes(self):
         p = CycleProfile.from_dict("test", _valid_profile_dict())
@@ -55,22 +54,23 @@ class TestCycleProfile:
 
     def test_validate_overlap(self):
         d = _valid_profile_dict()
-        # evac now ends at 100, but stable starts at 93 -> stable starts before evac ended
-        d["sections"]["evac"] = [57.6, 100.0]
+        # evac extended to 100° overlaps hold (which starts at 90°) →
+        # validator catches "section starts before previous ended".
+        d["sections"]["evac"] = [75.0, 100.0]
         p = CycleProfile.from_dict("test", d)
         with pytest.raises(ValueError, match="before previous section"):
             p.validate()
 
     def test_validate_inverted_range(self):
         d = _valid_profile_dict()
-        d["sections"]["hold"] = [273.6, 115.0]  # end <= start
+        d["sections"]["hold"] = [290.0, 90.0]  # end <= start
         p = CycleProfile.from_dict("test", d)
         with pytest.raises(ValueError, match="invalid range"):
             p.validate()
 
     def test_validate_exceeds_360(self):
         d = _valid_profile_dict()
-        d["sections"]["baseline_post"] = [302.4, 400.0]
+        d["sections"]["baseline_post"] = [304.0, 400.0]
         p = CycleProfile.from_dict("test", d)
         with pytest.raises(ValueError, match="exceeds 360"):
             p.validate()
@@ -98,7 +98,7 @@ class TestCycleProfile:
 
     def test_section_names_constant(self):
         assert SECTION_NAMES == [
-            "baseline_pre", "evac", "stable", "hold", "release", "baseline_post"
+            "baseline_pre", "evac", "hold", "release", "baseline_post"
         ]
 
 

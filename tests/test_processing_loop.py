@@ -38,12 +38,11 @@ def _profile() -> CycleProfile:
         bph=13000,
         cycle_total_ms=6900,
         sections={
-            "baseline_pre":  (0.0,   57.6),
-            "evac":          (57.6,  93.0),
-            "stable":        (93.0,  115.0),
-            "hold":          (115.0, 273.6),
-            "release":       (273.6, 302.4),
-            "baseline_post": (302.4, 360.0),
+            "baseline_pre":  (0.0,   75.0),
+            "evac":          (75.0,  90.0),
+            "hold":          (90.0,  290.0),
+            "release":       (290.0, 304.0),
+            "baseline_post": (304.0, 360.0),
         },
         trigger_angle=0.0,
         collection_points=70,
@@ -88,7 +87,7 @@ def _seed_fsm_with_cycle(fsm: CabinFSM, *, slope_per_sample: float,
 
     Bypasses the trigger by directly populating ``_data`` and setting state.
     """
-    angles = np.linspace(116.0, 270.0, n_points)  # all in hold (115..273.6)
+    angles = np.linspace(91.0, 289.0, n_points)  # all in hold (90..290)
     pressures = hold_baseline + slope_per_sample * np.arange(n_points)
     ts0 = time.time()
     timestamps = ts0 + np.arange(n_points) * 0.1
