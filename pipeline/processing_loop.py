@@ -1,27 +1,47 @@
-"""Main processing loop – orchestrates data flow from polling to inference.
+"""Main processing loop — orchestrates data flow from polling to inference (v2.6).
 
-v2.5: Added no-bottle detection (label=-2) and min_points guard.
+Pipeline per completed cycle:
+    1. Drain new poll frames into the per-cabin FSMs.
+    2. For each cabin in PROCESSING state:
+       a. Compute v2.6 43-dim features (segment-by-angle).
+       b. NO_BOTTLE early-out if hold_max < no_bottle_threshold.
+       c. M1 (per-cabin linear regression) → q_est primary output.
+       d. M2 (global XGBoost) when loaded → cross-check; raise F010 on
+          disagreement above ``m_disagreement_threshold``.
+       e. Compare q_est against the active product's q_threshold to label
+          LEAK / OK; raise F012 when q_est is below A_resolution.
+       f. Persist to DB (curves auto-compressed by storage layer).
+       g. PLC write-back: cabinHealthStatus carries q_est (Pa·m³/s).
+       h. Push alarm on LEAK.
+    3. Reset any FSMs left in FAULT.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from core.cycle_fsm import CycleFSMManager, CycleState
-from core.features import compute_features, features_to_vector
+from configs.loaders import is_cabin_calibrated
+from core.cycle_fsm import CycleFSMManager
+from core.cycle_profile import CycleProfile
+from core.feature_spec import FEATURE_ORDER_43D
+from core.features import compute_features_v26, features_to_vector
 from core.polling_engine import PollingEngine
+from core.quality_flags import QF_SHORT_HOLD, compute_quality_flags
+from core.rate_limit import warn_throttled
 from health.fault_reporter import FaultReporter
 from health.health_checker import HealthChecker
 from integration.alarm_pusher import AlarmPusher
 from integration.result_sender import ResultSender
-from models.supervised_xgb import SupervisedXGB
+from models.linear_regression_m1 import LinearRegressionM1
+from models.xgb_regressor_m2 import XGBRegressorM2
 from storage.database_logger import DatabaseLogger
 
 logger = logging.getLogger(__name__)
 
-# Label constants
+
+# Label constants (PLC-visible, match v2.5 semantics for the bool field)
 LABEL_LEAK = 0
 LABEL_OK = 1
 LABEL_NA = -1
@@ -29,20 +49,40 @@ LABEL_NO_BOTTLE = -2
 
 
 class ProcessingLoop:
-    """Main processing loop.
+    """Main processing loop (v2.6 — Q regression).
 
     Parameters
     ----------
     runtime_cfg : dict
-        The full content of ``runtime.yaml``.
+        Full runtime.yaml content. ``model_inference.a_resolution`` and
+        ``model_inference.m_disagreement_threshold`` configure the v2.6
+        decision logic; ``loop_interval`` and ``no_bottle_threshold``
+        are unchanged from v2.5.
+    profile : CycleProfile
+        Active cycle profile (defines section boundaries for features).
+    cabins_cfg : dict
+        Loaded ``cabins.yaml``; used only to flag uncalibrated cabins.
+    products_cfg : dict
+        Loaded ``products.yaml``; the active product's ``q_threshold``
+        drives LEAK/OK judgment.
+    polling_engine, fsm_manager : as v2.5.
+    m1_model, m2_model : v2.6 regression models. Either may be unloaded
+        at startup; the loop degrades to LABEL_NA in that case rather
+        than crashing.
+    db_logger, result_sender, alarm_pusher, health_checker, fault_reporter:
+        as v2.5.
     """
 
     def __init__(
         self,
         runtime_cfg: Dict[str, Any],
+        profile: CycleProfile,
+        cabins_cfg: Dict[str, Any],
+        products_cfg: Dict[str, Any],
         polling_engine: PollingEngine,
         fsm_manager: CycleFSMManager,
-        model: SupervisedXGB,
+        m1_model: LinearRegressionM1,
+        m2_model: XGBRegressorM2,
         db_logger: DatabaseLogger,
         result_sender: ResultSender,
         alarm_pusher: AlarmPusher,
@@ -50,28 +90,44 @@ class ProcessingLoop:
         fault_reporter: FaultReporter,
     ):
         self._cfg = runtime_cfg
+        self._profile = profile
+        self._cabins_cfg = cabins_cfg or {}
+        self._products_cfg = products_cfg or {}
         self._poller = polling_engine
         self._fsm = fsm_manager
-        self._model = model
+        self._m1 = m1_model
+        self._m2 = m2_model
         self._db = db_logger
         self._sender = result_sender
         self._alarm = alarm_pusher
         self._health = health_checker
         self._reporter = fault_reporter
 
-        # Threshold lives under model_inference.threshold in runtime.yaml;
-        # fall back to top-level "threshold" for backward compatibility.
+        # ── v2.6 inference parameters ─────────────────────────
         mi_cfg = runtime_cfg.get("model_inference", {}) or {}
-        self._threshold = mi_cfg.get("threshold", runtime_cfg.get("threshold", 0.25))
-        self._feature_mode = runtime_cfg.get("feature_mode", "7d")
-        self._loop_interval = runtime_cfg.get("loop_interval", 0.05)
-        self._no_bottle_threshold = runtime_cfg.get("no_bottle_threshold", 50.0)
+        self._a_resolution = float(mi_cfg.get("a_resolution", 1.0e-5))
+        self._m_disagreement_threshold = float(mi_cfg.get("m_disagreement_threshold", 0.20))
+
+        # ── Active product ────────────────────────────────────
+        self._current_product_id = self._products_cfg.get("default_product_id", "default")
+
+        # ── Misc ──────────────────────────────────────────────
+        self._loop_interval = float(runtime_cfg.get("loop_interval", 0.05))
+        self._no_bottle_threshold = float(runtime_cfg.get("no_bottle_threshold", 50.0))
         self._running = False
         self._paused = False
         self._watchdog = True
-        self._last_poll_ts = 0.0
+        # Seq cursor into the polling engine's frame buffer. -1 means
+        # "no frames seen yet" (the engine's first frame has seq=0).
+        self._last_poll_seq = -1
 
-    # -- lifecycle -----------------------------------------------------------
+        # Surface model availability at construction time (one-shot fault).
+        # HealthChecker.run_all_checks() also raises/resolves F002 dynamically.
+        if not self._m1.loaded:
+            logger.warning("M1 not loaded; system will run but produce no Q_est.")
+            self._reporter.raise_fault("F002", "M1 模型未加载")
+
+    # ── Lifecycle ──────────────────────────────────────────────
 
     @property
     def is_running(self) -> bool:
@@ -84,7 +140,10 @@ class ProcessingLoop:
     def start(self) -> None:
         self._running = True
         self._paused = False
-        logger.info("ProcessingLoop started")
+        logger.info("ProcessingLoop started (product=%s, A=%.2e, "
+                    "M-disagree=%.0f%%)",
+                    self._current_product_id, self._a_resolution,
+                    self._m_disagreement_threshold * 100)
 
     def stop(self) -> None:
         self._running = False
@@ -103,7 +162,16 @@ class ProcessingLoop:
         logger.info("Watchdog %s", "ON" if self._watchdog else "OFF")
         return self._watchdog
 
-    # -- main loop -----------------------------------------------------------
+    def set_active_product(self, product_id: str) -> bool:
+        """Switch the active product. Returns True if found, False otherwise."""
+        if product_id in (self._products_cfg.get("products", {}) or {}):
+            self._current_product_id = product_id
+            logger.info("Active product set to %s", product_id)
+            return True
+        logger.warning("Unknown product_id: %s", product_id)
+        return False
+
+    # ── Main loop ──────────────────────────────────────────────
 
     def run_once(self) -> None:
         if not self._running or self._paused:
@@ -112,31 +180,103 @@ class ProcessingLoop:
 
         try:
             self._feed_fsm()
-
             for cabin_id in self._fsm.get_processing_cabins():
                 self._process_cabin(cabin_id)
-
             for cabin_id in self._fsm.get_fault_cabins():
                 self._handle_fault(cabin_id)
-
         except Exception as exc:
             logger.error("Processing loop error: %s", exc, exc_info=True)
 
         time.sleep(self._loop_interval)
 
-    # -- internal ------------------------------------------------------------
+    # ── Internals ─────────────────────────────────────────────
 
     def _feed_fsm(self) -> None:
-        frames = self._poller.drain_frames_since(self._last_poll_ts)
+        frames = self._poller.drain_frames_since_seq(self._last_poll_seq)
         if not frames:
             return
         for frame in frames:
             cabin_map = {c.cabin_index: c for c in frame.cabins}
             self._fsm.update_all(cabin_map)
-        self._last_poll_ts = frames[-1].timestamp
+        self._last_poll_seq = frames[-1].seq
+
+    def _q_threshold_for(self, product_id: str) -> Optional[float]:
+        """Look up Q_threshold for the active product, or None if absent."""
+        product = (self._products_cfg.get("products", {}) or {}).get(product_id)
+        if not product:
+            return None
+        thr = product.get("q_threshold")
+        return float(thr) if thr is not None else None
+
+    def _predict_q(
+        self,
+        feats: Dict[str, float],
+        feature_vector_43d: List[float],
+        cabin_id: int,
+    ) -> Dict[str, Any]:
+        """Run M1 + M2 and fuse. Returns a dict with q_est, m1_q, m2_q,
+        m_disagreement, q_uncertainty, cabin_calibrated, valid, below_resolution."""
+        if not self._m1.loaded:
+            return {
+                "q_est": 0.0, "valid": False,
+                "m1_q": 0.0, "m2_q": None,
+                "m_disagreement": 0.0,
+                "q_uncertainty": float("inf"),
+                "cabin_calibrated": False,
+                "below_resolution": True,
+            }
+
+        primary_section = self._m1.primary_section
+        primary_slope = float(feats.get(f"{primary_section}_trend_slope", 0.0))
+
+        m1_result = self._m1.predict(primary_slope, cabin_id)
+        m1_q = float(m1_result["q_est"])
+        m1_calibrated = bool(m1_result["cabin_calibrated"])
+
+        # F011 (uncalibrated cabin): only raise if cabins.yaml also says so,
+        # to avoid double-reporting when M1 just hasn't been retrained yet.
+        if not m1_calibrated and not is_cabin_calibrated(self._cabins_cfg, cabin_id):
+            self._reporter.raise_fault("F011", f"舱 {cabin_id} 未标定")
+
+        # M2 cross-check
+        m2_q: Optional[float] = None
+        if self._m2.loaded:
+            try:
+                m2_result = self._m2.predict(feature_vector_43d)
+                if m2_result["valid"]:
+                    m2_q = float(m2_result["q_est"])
+            except Exception as exc:
+                logger.warning("M2 predict failed: %s", exc)
+
+        if m2_q is not None and abs(m1_q) > 1e-12:
+            disagreement = abs(m2_q - m1_q) / abs(m1_q)
+        else:
+            disagreement = 0.0
+
+        if m2_q is not None and disagreement > self._m_disagreement_threshold:
+            logger.warning(
+                "Cabin %d: M1/M2 disagree %.1f%% (M1=%.3e, M2=%.3e)",
+                cabin_id, disagreement * 100, m1_q, m2_q,
+            )
+            self._reporter.raise_fault(
+                "F010",
+                f"舱 {cabin_id}: M1/M2 漏率估计差异 {disagreement * 100:.1f}%",
+            )
+
+        below_resolution = abs(m1_q) < self._a_resolution
+        return {
+            "q_est": m1_q,         # M1 is the primary estimator
+            "valid": True,
+            "m1_q": m1_q,
+            "m2_q": m2_q,
+            "m_disagreement": disagreement,
+            "q_uncertainty": float(m1_result["uncertainty"]),
+            "cabin_calibrated": m1_calibrated,
+            "below_resolution": below_resolution,
+        }
 
     def _process_cabin(self, cabin_id: int) -> None:
-        """Run feature extraction, inference, logging, and write-back."""
+        """v2.6: full-cycle features + dual-track Q regression + Q-threshold judgment."""
         fsm = self._fsm.fsms[cabin_id]
         data = fsm.harvest()
 
@@ -148,33 +288,61 @@ class ProcessingLoop:
 
         t0 = time.perf_counter()
 
-        # Feature extraction
-        feats = compute_features(data.pressures, cabin_id)
-        vec = features_to_vector(feats, mode=self._feature_mode)
-
+        # ── Feature extraction (43-dim) ───────────────────────
+        feats = compute_features_v26(
+            data.pressures, data.angles, cabin_id, self._profile,
+        )
+        feature_vector = features_to_vector(feats, mode="43d")
         duration_s = (data.timestamps[-1] - data.timestamps[0]) if len(data.timestamps) > 1 else 0.0
 
-        # ── No-bottle detection: max pressure < threshold ─────────
-        if feats["max"] < self._no_bottle_threshold:
-            result = {"label": LABEL_NO_BOTTLE, "probability": 0.0, "confidence": 0.0}
-            label_str = "NO_BOTTLE"
-            logger.info(
-                "Cabin %d: NO_BOTTLE (max=%.1f < %.1f, points=%d)",
-                cabin_id, feats["max"], self._no_bottle_threshold, len(data.pressures),
+        # ── Per-cycle data-quality bitmask (for DB column) ────
+        quality_flags = compute_quality_flags(feats)
+        if quality_flags & QF_SHORT_HOLD:
+            # hold_trend_slope is M1's only signal; warn (rate-limited) so
+            # operators see when the primary-section data is degraded.
+            warn_throttled(
+                "processing_loop.short_hold",
+                "Cabin %d: hold section had < 2 points; M1 slope unreliable",
+                cabin_id,
             )
-        # ── Normal inference ──────────────────────────────────────
-        elif self._model.loaded:
-            result = self._model.predict(vec, threshold=self._threshold)
-            label_str = "OK" if result["label"] == LABEL_OK else "LEAK"
-        else:
-            result = {"label": LABEL_NA, "probability": 0.0, "confidence": 0.0}
+
+        # ── NO_BOTTLE detection: hold-section max < threshold ─
+        hold_max = float(feats.get("hold_max", 0.0))
+        if hold_max < self._no_bottle_threshold:
+            self._handle_no_bottle(cabin_id, fsm, data, feats, duration_s,
+                                   quality_flags=quality_flags)
+            return
+
+        # ── Q inference ───────────────────────────────────────
+        q_result = self._predict_q(feats, feature_vector, cabin_id)
+        q_threshold = self._q_threshold_for(self._current_product_id)
+
+        if not q_result["valid"]:
+            label = LABEL_NA
             label_str = "N/A"
-            logger.warning("Cabin %d: model not loaded, skipping inference", cabin_id)
+        elif q_result["below_resolution"]:
+            label = LABEL_NA
+            label_str = "BELOW_A"
+            self._reporter.raise_fault(
+                "F012",
+                f"舱 {cabin_id}: Q={q_result['q_est']:.2e} 低于分辨率 A={self._a_resolution:.2e}",
+            )
+        elif q_threshold is None:
+            label = LABEL_NA
+            label_str = "NO_THRESHOLD"
+            logger.warning("Active product %s has no q_threshold; cannot judge",
+                           self._current_product_id)
+        elif q_result["q_est"] > q_threshold:
+            label = LABEL_LEAK
+            label_str = "LEAK"
+        else:
+            label = LABEL_OK
+            label_str = "OK"
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         self._health.report_inference_latency(elapsed_ms)
 
-        # ── Database logging (always, including NO_BOTTLE) ────────
+        # ── DB logging ────────────────────────────────────────
         try:
             self._db.log_record(
                 cavity_id=cabin_id,
@@ -183,38 +351,88 @@ class ProcessingLoop:
                 ai_values=data.ai_values,
                 positions=data.positions,
                 features=feats,
-                label=result["label"],
-                probability=result["probability"],
-                confidence=result["confidence"],
-                model_version=self._model.version if self._model.loaded else "none",
+                label=label,
+                # `probability` column kept for back-compat; v2.6 stores Q_est
+                probability=q_result.get("q_est", 0.0),
+                # `confidence` repurposed to (1 - relative uncertainty), clipped
+                confidence=self._confidence_from_q(q_result),
+                model_version=self._m1.version if self._m1.loaded else "none",
                 duration_s=duration_s,
                 leak_valve_status=data.leak_valve_status,
                 end_angle=data.end_angle,
+                cycle_profile_id=data.cycle_profile_id,
+                q_est=q_result.get("q_est"),
+                q_threshold=q_threshold,
+                q_uncertainty=q_result.get("q_uncertainty"),
+                m1_q=q_result.get("m1_q"),
+                m2_q=q_result.get("m2_q"),
+                m_disagreement=q_result.get("m_disagreement"),
+                product_id=self._current_product_id,
+                quality_flags=quality_flags,
             )
         except Exception as exc:
             logger.error("DB logging failed for cabin %d: %s", cabin_id, exc)
             self._reporter.raise_fault("F006", f"数据库写入失败: {exc}")
 
-        # ── PLC write-back (skip NO_BOTTLE and N/A) ───────────────
-        if result["label"] in (LABEL_OK, LABEL_LEAK):
+        # ── PLC write-back: cabinHealthStatus = Q_est ─────────
+        if label in (LABEL_OK, LABEL_LEAK):
             try:
-                self._sender.write_result(cabin_id, result["label"], result["probability"])
+                self._sender.write_result(cabin_id, label, q_result["q_est"])
             except Exception as exc:
                 logger.error("PLC write-back failed for cabin %d: %s", cabin_id, exc)
 
-        # ── Alarm push (leak only) ────────────────────────────────
-        if result["label"] == LABEL_LEAK:
-            self._alarm.push_leak_alarm(cabin_id, result["probability"])
+        # ── Alarm push (leak only) ────────────────────────────
+        if label == LABEL_LEAK:
+            self._alarm.push_leak_alarm(cabin_id, q_result["q_est"])
 
-        # ── Log summary ───────────────────────────────────────────
-        if result["label"] != LABEL_NO_BOTTLE:
-            logger.info(
-                "Cabin %d: %s (prob=%.4f, conf=%.4f, points=%d, %.1fms)",
-                cabin_id, label_str, result["probability"], result["confidence"],
-                len(data.pressures), elapsed_ms,
-            )
+        logger.info(
+            "Cabin %d: %s (Q=%.3e, threshold=%.3e, M1=%.3e, M2=%s, %.1fms)",
+            cabin_id, label_str,
+            q_result.get("q_est", 0.0), q_threshold or 0.0,
+            q_result.get("m1_q", 0.0),
+            f"{q_result['m2_q']:.3e}" if q_result.get("m2_q") is not None else "n/a",
+            elapsed_ms,
+        )
 
         fsm.reset()
+
+    def _handle_no_bottle(self, cabin_id, fsm, data, feats, duration_s,
+                          quality_flags: int = 0) -> None:
+        logger.info("Cabin %d: NO_BOTTLE (hold_max=%.1f < %.1f, points=%d)",
+                    cabin_id, feats.get("hold_max", 0.0),
+                    self._no_bottle_threshold, len(data.pressures))
+        try:
+            self._db.log_record(
+                cavity_id=cabin_id,
+                pressures=data.pressures, angles=data.angles,
+                ai_values=data.ai_values, positions=data.positions,
+                features=feats,
+                label=LABEL_NO_BOTTLE,
+                probability=0.0, confidence=0.0,
+                model_version=self._m1.version if self._m1.loaded else "none",
+                duration_s=duration_s,
+                leak_valve_status=data.leak_valve_status,
+                end_angle=data.end_angle,
+                cycle_profile_id=data.cycle_profile_id,
+                q_est=0.0, q_threshold=None, q_uncertainty=None,
+                m1_q=0.0, m2_q=None, m_disagreement=0.0,
+                product_id=self._current_product_id,
+                quality_flags=quality_flags,
+            )
+        except Exception as exc:
+            logger.error("DB logging failed for cabin %d: %s", cabin_id, exc)
+            self._reporter.raise_fault("F006", f"数据库写入失败: {exc}")
+        fsm.reset()
+
+    @staticmethod
+    def _confidence_from_q(q_result: Dict[str, Any]) -> float:
+        """Map relative_uncertainty (0..1+) into a confidence score (0..1)."""
+        rel = q_result.get("q_uncertainty", float("inf"))
+        q = q_result.get("q_est", 0.0) or 1.0
+        if rel == float("inf") or abs(q) < 1e-12:
+            return 0.0
+        rel_unc = abs(rel) / abs(q)
+        return float(max(0.0, min(1.0, 1.0 - rel_unc)))
 
     def _handle_fault(self, cabin_id: int) -> None:
         # Per-cycle FAULT (e.g. collection timeout) is recoverable and common
@@ -223,19 +441,27 @@ class ProcessingLoop:
         logger.warning("Cabin %d in FAULT state, resetting", cabin_id)
         self._fsm.fsms[cabin_id].clear_fault()
 
+    # ── Diagnostics ─────────────────────────────────────────
+
     def get_diagnostics(self) -> Dict[str, Any]:
         cabin_states = {}
         for cid, fsm in self._fsm.fsms.items():
             cabin_states[cid] = {"state": fsm.state.value, "points": fsm.point_count}
         return {
-            "running": self._running, "paused": self._paused,
-            "watchdog": self._watchdog, "threshold": self._threshold,
+            "running": self._running,
+            "paused": self._paused,
+            "watchdog": self._watchdog,
             "no_bottle_threshold": self._no_bottle_threshold,
-            "feature_mode": self._feature_mode,
-            "last_poll_ts": self._last_poll_ts,
+            "a_resolution": self._a_resolution,
+            "m_disagreement_threshold": self._m_disagreement_threshold,
+            "current_product_id": self._current_product_id,
+            "last_poll_seq": self._last_poll_seq,
             "poller_buffer": self._poller.buffer_length,
             "poller_stats": self._poller.stats,
             "cabin_states": cabin_states,
-            "model_loaded": self._model.loaded,
-            "model_version": self._model.version if self._model.loaded else "none",
+            "m1_loaded": self._m1.loaded,
+            "m1_version": self._m1.version if self._m1.loaded else "none",
+            "m2_loaded": self._m2.loaded,
+            "m2_version": self._m2.version if self._m2.loaded else "none",
+            "profile_id": self._profile.profile_id if self._profile else "none",
         }

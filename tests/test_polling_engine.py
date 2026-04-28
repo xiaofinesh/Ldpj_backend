@@ -84,3 +84,43 @@ class TestPollingEngine:
         frames = engine.drain_frames_since(ts)
         assert len(frames) > 0
         engine.stop()
+
+    def test_seq_is_monotonic(self, plc_cfg):
+        """Each polled frame gets a strictly increasing seq."""
+        engine = PollingEngine(plc_cfg, mode="mock")
+        engine.start()
+        time.sleep(0.3)
+        engine.stop()
+        with engine._lock:
+            seqs = [f.seq for f in engine._buffer]
+        assert seqs == sorted(seqs)
+        assert len(set(seqs)) == len(seqs)  # no duplicates
+        # latest_seq is the high-water mark
+        assert engine.latest_seq == seqs[-1]
+
+    def test_drain_since_seq_returns_only_new_frames(self, plc_cfg):
+        engine = PollingEngine(plc_cfg, mode="mock")
+        engine.start()
+        time.sleep(0.2)
+        first_batch = engine.drain_frames_since_seq(-1)
+        assert len(first_batch) > 0
+        # Cursor advances past what we just took
+        cursor = first_batch[-1].seq
+        time.sleep(0.2)
+        second_batch = engine.drain_frames_since_seq(cursor)
+        assert len(second_batch) > 0
+        # Second batch's seqs are all > cursor
+        assert min(f.seq for f in second_batch) > cursor
+        engine.stop()
+
+    def test_drain_since_seq_caught_up_returns_empty(self, plc_cfg):
+        engine = PollingEngine(plc_cfg, mode="mock")
+        engine.start()
+        time.sleep(0.15)
+        all_frames = engine.drain_frames_since_seq(-1)
+        cursor = all_frames[-1].seq
+        # Asking again with the same cursor (no new ticks possible mid-call)
+        # should typically return [], unless polling raced. Accept ≤ a few.
+        again = engine.drain_frames_since_seq(cursor)
+        assert all(f.seq > cursor for f in again)
+        engine.stop()

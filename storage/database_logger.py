@@ -5,6 +5,7 @@ import json, logging, os, sqlite3, threading, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from core.exceptions import StorageError
+from storage.compression import compress_float_array, decompress_float_array
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,24 @@ CREATE INDEX IF NOT EXISTS idx_records_label ON test_records(label);
 
 # Migration for existing databases that lack new columns
 _MIGRATIONS = [
+    # v2.5
     "ALTER TABLE test_records ADD COLUMN leak_valve_status INTEGER",
     "ALTER TABLE test_records ADD COLUMN end_angle REAL",
+    # v2.6 — cycle profile + Q regression + product
+    "ALTER TABLE test_records ADD COLUMN cycle_profile_id TEXT",
+    "ALTER TABLE test_records ADD COLUMN pressure_data_compressed BLOB",
+    "ALTER TABLE test_records ADD COLUMN angle_data_compressed BLOB",
+    "ALTER TABLE test_records ADD COLUMN q_est REAL",
+    "ALTER TABLE test_records ADD COLUMN q_threshold REAL",
+    "ALTER TABLE test_records ADD COLUMN q_uncertainty REAL",
+    "ALTER TABLE test_records ADD COLUMN m1_q REAL",
+    "ALTER TABLE test_records ADD COLUMN m2_q REAL",
+    "ALTER TABLE test_records ADD COLUMN m_disagreement REAL",
+    "ALTER TABLE test_records ADD COLUMN product_id TEXT",
+    # Bitmask flagging silently-degraded computations during this cycle
+    # (short sections, clamped C_d, etc.). See core/quality_flags.py for
+    # the bit layout.
+    "ALTER TABLE test_records ADD COLUMN quality_flags INTEGER DEFAULT 0",
 ]
 
 
@@ -66,23 +83,50 @@ class DatabaseLogger:
     def log_record(self, cavity_id, pressures, angles, ai_values, positions,
                    features, label, probability, confidence, model_version,
                    duration_s, leak_valve_status=None, end_angle=None,
-                   batch_id="") -> int:
+                   batch_id="",
+                   # v2.6 fields (all default None for backward compatibility)
+                   cycle_profile_id=None,
+                   q_est=None, q_threshold=None, q_uncertainty=None,
+                   m1_q=None, m2_q=None, m_disagreement=None,
+                   product_id=None,
+                   quality_flags: int = 0) -> int:
+        """Insert a record. Pressures/angles are auto-compressed to BLOB.
+
+        v2.6: pressure_data_compressed and angle_data_compressed carry the
+        actual curve bytes. The legacy pressure_data column is kept as an
+        empty-string placeholder (its NOT NULL constraint cannot be relaxed
+        without a table rewrite); query_record_detail() auto-decompresses
+        on read so callers see pressure_data as a JSON string.
+        """
+        # v2.6: compress curves; keep the legacy pressure_data column as
+        # an empty placeholder ("" satisfies NOT NULL on existing schemas).
+        pressure_blob = compress_float_array(pressures)
+        angle_blob = compress_float_array(angles) if angles else None
+
         with self._lock:
             try:
                 ts = time.strftime("%Y-%m-%dT%H:%M:%S")
                 cur = self._conn.execute(
-                    "INSERT INTO test_records (batch_id,cavity_id,timestamp,pressure_data,"
+                    "INSERT INTO test_records ("
+                    "batch_id,cavity_id,timestamp,pressure_data,"
                     "angle_data,ai_data,position_data,features,label,probability,confidence,"
-                    "model_version,duration_s,point_count,leak_valve_status,end_angle"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (batch_id, cavity_id, ts, json.dumps(pressures),
-                     json.dumps(angles) if angles else None,
+                    "model_version,duration_s,point_count,leak_valve_status,end_angle,"
+                    "cycle_profile_id,pressure_data_compressed,angle_data_compressed,"
+                    "q_est,q_threshold,q_uncertainty,"
+                    "m1_q,m2_q,m_disagreement,product_id,quality_flags"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (batch_id, cavity_id, ts, "",
+                     None,
                      json.dumps(ai_values) if ai_values else None,
                      json.dumps(positions) if positions else None,
                      json.dumps(features), label, probability, confidence,
                      model_version, round(duration_s, 3), len(pressures),
                      int(leak_valve_status) if leak_valve_status is not None else None,
-                     round(end_angle, 2) if end_angle is not None else None))
+                     round(end_angle, 2) if end_angle is not None else None,
+                     cycle_profile_id, pressure_blob, angle_blob,
+                     q_est, q_threshold, q_uncertainty,
+                     m1_q, m2_q, m_disagreement, product_id,
+                     int(quality_flags) if quality_flags is not None else 0))
                 self._conn.commit()
                 return cur.lastrowid
             except Exception as exc:
@@ -115,9 +159,39 @@ class DatabaseLogger:
                 row = cur.fetchone()
                 if row is None: return None
                 cols = [d[0] for d in cur.description]
-                return dict(zip(cols, row))
+                detail = dict(zip(cols, row))
             except Exception as exc:
                 raise StorageError(f"query_record_detail failed: {exc}") from exc
+
+        # v2.6: when the legacy text column is an empty placeholder but the
+        # compressed BLOB is populated, decompress and surface the data
+        # under the legacy key as a JSON string. Callers (e.g. data_exporter)
+        # then see the same shape as v2.5.
+        if not detail.get("pressure_data") and detail.get("pressure_data_compressed"):
+            arr = decompress_float_array(detail["pressure_data_compressed"])
+            if arr is not None:
+                detail["pressure_data"] = json.dumps(arr)
+        if not detail.get("angle_data") and detail.get("angle_data_compressed"):
+            arr = decompress_float_array(detail["angle_data_compressed"])
+            if arr is not None:
+                detail["angle_data"] = json.dumps(arr)
+
+        return detail
+
+    def get_full_record(self, record_id: int) -> Optional[Dict[str, Any]]:
+        """v2.6: fetch one record with decompressed pressures/angles as lists.
+
+        Returns the full dict with two extra keys ``pressures`` and ``angles``
+        holding python lists (or [] if not present). Compressed BLOB fields
+        are removed from the result so downstream code does not have to
+        worry about bytes.
+        """
+        detail = self.query_record_detail(record_id)
+        if detail is None:
+            return None
+        detail["pressures"] = decompress_float_array(detail.pop("pressure_data_compressed", None)) or []
+        detail["angles"] = decompress_float_array(detail.pop("angle_data_compressed", None)) or []
+        return detail
 
     def count_records(self) -> int:
         with self._lock:
@@ -127,3 +201,28 @@ class DatabaseLogger:
     def get_db_size_mb(self) -> float:
         try: return os.path.getsize(self._db_path) / (1024 * 1024)
         except Exception: return 0.0
+
+    def iter_records_raw(self, sql: str, params: List[Any]):
+        """Yield rows for a custom SELECT, releasing the lock between rows.
+
+        Used by ``data_exporter.export_to_csv`` so a long-running scan does
+        NOT monopolize the write lock for the whole scan. With Python's
+        sqlite3, the single connection still serializes individual
+        operations, but releasing between rows lets concurrent
+        ``log_record`` calls slip in instead of blocking for seconds.
+
+        The query and column metadata are read once under lock; subsequent
+        ``fetchone`` calls each acquire-and-release the lock briefly.
+        """
+        with self._lock:
+            try:
+                cur = self._conn.execute(sql, params)
+                cols = [d[0] for d in cur.description]
+            except Exception as exc:
+                raise StorageError(f"iter_records_raw setup failed: {exc}") from exc
+        while True:
+            with self._lock:
+                row = cur.fetchone()
+            if row is None:
+                return
+            yield dict(zip(cols, row))

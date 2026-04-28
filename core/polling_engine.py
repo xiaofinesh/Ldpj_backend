@@ -40,6 +40,7 @@ class CabinFrame:
 class PollFrame:
     timestamp: float
     cabins: List[CabinFrame] = field(default_factory=list)
+    seq: int = 0   # monotonically increasing across the engine's lifetime
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +298,9 @@ class PollingEngine:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
-        self._stats = {"total_polls": 0, "errors": 0, "reconnects": 0}
+        self._next_seq = 0   # monotonic counter assigned to PollFrame.seq
+        self._stats = {"total_polls": 0, "errors": 0, "reconnects": 0,
+                       "behind_ticks": 0}
 
     @property
     def is_running(self) -> bool:
@@ -320,7 +323,39 @@ class PollingEngine:
         with self._lock:
             return self._buffer[-1] if self._buffer else None
 
+    @property
+    def latest_seq(self) -> int:
+        """Highest seq assigned so far (== self._next_seq - 1, or -1 if no
+        frames yet). Useful for callers initializing their cursor."""
+        return self._next_seq - 1
+
+    def drain_frames_since_seq(self, last_seq: int) -> List[PollFrame]:
+        """Return frames with seq > last_seq, oldest-first.
+
+        O(K) where K is the number of new frames since the caller's last
+        drain (typically 5 frames at 50 ms loop / 10 ms poll). Replaces
+        the v2.5 timestamp-scan that walked the entire deque (10–25k frames).
+        """
+        with self._lock:
+            if not self._buffer:
+                return []
+            # If the caller is fully caught up, exit fast.
+            if self._buffer[-1].seq <= last_seq:
+                return []
+            # Walk backwards from the newest until we find one already seen,
+            # then reverse to deliver in oldest-first order.
+            result: List[PollFrame] = []
+            for frame in reversed(self._buffer):
+                if frame.seq <= last_seq:
+                    break
+                result.append(frame)
+            result.reverse()
+            return result
+
     def drain_frames_since(self, since_ts: float) -> List[PollFrame]:
+        """[Deprecated] Timestamp-based drain. Kept for any external caller;
+        new code should use ``drain_frames_since_seq``.
+        """
         with self._lock:
             return [f for f in self._buffer if f.timestamp > since_ts]
 
@@ -341,10 +376,25 @@ class PollingEngine:
         logger.info("PollingEngine stopped")
 
     def _poll_loop(self) -> None:
+        """Tick-aligned polling loop.
+
+        Uses ``time.monotonic()`` and a target-tick clock so the actual
+        period equals the configured interval regardless of how long
+        ``db_read`` takes. ``time.sleep(interval)`` after IO would
+        accumulate the IO time as drift (each cycle ends up slower than
+        the previous), pushing the effective polling rate well below the
+        configured frequency on real S7 connections (typical RTT 5–15 ms
+        per read on a 10 ms target → effective rate halved).
+        """
+        next_tick = time.monotonic()
         while self._running:
             try:
-                raw = self._conn.db_read(self._db_number, self._start_offset, self._total_read_size)
+                raw = self._conn.db_read(
+                    self._db_number, self._start_offset, self._total_read_size,
+                )
                 frame = self._parse_frame(raw)
+                frame.seq = self._next_seq
+                self._next_seq += 1
                 with self._lock:
                     self._buffer.append(frame)
                 self._stats["total_polls"] += 1
@@ -352,10 +402,25 @@ class PollingEngine:
                 self._stats["errors"] += 1
                 logger.warning("Poll error: %s", exc)
                 self._try_reconnect()
+                next_tick = time.monotonic()  # resync after reconnect window
+                continue
             except Exception as exc:
                 self._stats["errors"] += 1
                 logger.error("Unexpected poll error: %s", exc, exc_info=True)
-            time.sleep(self._interval)
+
+            next_tick += self._interval
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                # Behind schedule. If we've fallen far behind (> 100 ms),
+                # log it and reset the clock so we don't burn the CPU
+                # trying to "catch up" by issuing a flood of reads back-to-back.
+                self._stats["behind_ticks"] += 1
+                if delay < -0.1:
+                    logger.warning("Polling fell behind by %.0f ms; resyncing",
+                                   -delay * 1000)
+                    next_tick = time.monotonic()
 
     def _try_reconnect(self) -> None:
         time.sleep(self._reconnect_interval)

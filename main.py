@@ -24,8 +24,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.loaders import (
+    load_active_cycle_profile,
+    load_cabins_config,
     load_health_config, load_ipc_config, load_models_config,
-    load_plc_config, load_runtime_config,
+    load_plc_config, load_products_config, load_runtime_config,
 )
 from core.cycle_fsm import CycleFSMManager
 from core.logging_setup import setup_logging, set_console_mode
@@ -35,7 +37,8 @@ from health.health_checker import HealthChecker
 from integration.alarm_pusher import AlarmPusher
 from integration.api_server import APIServer
 from integration.result_sender import ResultSender
-from models.supervised_xgb import SupervisedXGB
+from models.linear_regression_m1 import LinearRegressionM1
+from models.xgb_regressor_m2 import XGBRegressorM2
 from pipeline.processing_loop import ProcessingLoop
 from storage.database_logger import DatabaseLogger
 from storage.data_exporter import interactive_export
@@ -87,9 +90,14 @@ class StatusReporter:
         polls = self._poller.stats.get("total_polls", 0)
         errs = self._poller.stats.get("errors", 0)
         faults = len(self._faults.active_faults)
-        print(f"\n[{time.strftime('%H:%M:%S')}] {state} | PLC:{plc} | "
-              f"模型:{mdl} | 轮询:{polls} 错误:{errs} | "
-              f"记录:{records} | 故障:{faults}")
+        # The console line bypasses the logging filter on purpose so the
+        # operator sees a periodic heartbeat in normal mode (where the
+        # console handler suppresses INFO). The mirror to the file logger
+        # captures the same heartbeat in ldpj_backend.log for postmortems.
+        msg = (f"{state} | PLC:{plc} | 模型:{mdl} | "
+               f"轮询:{polls} 错误:{errs} | 记录:{records} | 故障:{faults}")
+        print(f"\n[{time.strftime('%H:%M:%S')}] {msg}")
+        logger.info("status: %s", msg)
 
 
 # ── UI ─────────────────────────────────────────────────────────────────
@@ -164,6 +172,29 @@ def main():
     # Logging: file=INFO always, console controlled by mode
     logger = setup_logging(runtime_cfg.get("logging", {}))
 
+    # ── Load v2.6 configs (profile / cabins / products) ────────────
+    # Profile is required; cabins/products fall back to empty dicts so a
+    # development environment without those files can still boot, with
+    # M1's uncalibrated-cabin path triggering F011.
+    try:
+        cycle_profile = load_active_cycle_profile()
+    except Exception as exc:
+        logger.error("Failed to load active cycle profile: %s", exc)
+        print(f"  错误: 周期配方加载失败 — {exc}")
+        sys.exit(1)
+
+    try:
+        cabins_cfg = load_cabins_config()
+    except FileNotFoundError as exc:
+        logger.warning("cabins.yaml missing: %s. Using defaults.", exc)
+        cabins_cfg = {}
+
+    try:
+        products_cfg = load_products_config()
+    except FileNotFoundError as exc:
+        logger.warning("products.yaml missing: %s. Using defaults.", exc)
+        products_cfg = {}
+
     # ── Init subsystems ────────────────────────────────────────────
     fault_reporter = FaultReporter()
 
@@ -177,48 +208,72 @@ def main():
     polling_engine.start()
 
     cabin_cfg = plc_cfg.get("cabin_array", {})
-    cycle_cfg = runtime_cfg.get("cycle_detection", {})
     active_start = cabin_cfg.get("active_start", 1)
     active_end = cabin_cfg.get("active_end", 25)
     fsm_manager = CycleFSMManager(
-        cabin_cfg.get("cabin_count", 26), cycle_cfg,
-        active_start=active_start, active_end=active_end)
+        cabin_cfg.get("cabin_count", 26),
+        cycle_profile,
+        active_start=active_start,
+        active_end=active_end,
+    )
 
-    model = SupervisedXGB(models_cfg, base_dir=PROJECT_ROOT)
+    # ── Load v2.6 regression models ────────────────────────────────
+    m1_model = LinearRegressionM1(models_cfg, base_dir=PROJECT_ROOT)
     try:
-        model.load()
+        m1_model.load()
     except Exception as exc:
-        fault_reporter.raise_fault("F002", str(exc))
+        logger.warning("M1 not loaded: %s. System will run but produce no Q_est.", exc)
+
+    m2_model = XGBRegressorM2(models_cfg, base_dir=PROJECT_ROOT)
+    try:
+        m2_model.load()
+    except Exception as exc:
+        logger.warning("M2 not loaded: %s. Cross-check disabled.", exc)
 
     db_logger = DatabaseLogger(
         runtime_cfg.get("database", {}).get("path", "ldpj_data.db"))
 
     result_sender = ResultSender(plc_cfg, polling_engine)
+    # v2.6: async writeback so 25 simultaneous PROCESSING cabins don't
+    # block the polling thread on snap7 RMW.
+    result_sender.enable_async()
 
     health_checker = HealthChecker(health_cfg, fault_reporter)
+    # HealthChecker still expects a single `model` reference for F002 — give
+    # it M1, since M1 is the primary inference path.
     health_checker.set_references(
-        polling_engine=polling_engine, model=model,
+        polling_engine=polling_engine, model=m1_model,
         db_logger=db_logger, fsm_manager=fsm_manager)
     health_checker.start()
 
     api_server = APIServer(ipc_cfg)
     api_server.set_references(
         db_logger=db_logger, health_checker=health_checker,
-        polling_engine=polling_engine, model=model,
+        polling_engine=polling_engine, model=m1_model,
         fault_reporter=fault_reporter)
     api_server.start()
 
     proc_loop = ProcessingLoop(
-        runtime_cfg=runtime_cfg, polling_engine=polling_engine,
-        fsm_manager=fsm_manager, model=model, db_logger=db_logger,
-        result_sender=result_sender, alarm_pusher=alarm_pusher,
-        health_checker=health_checker, fault_reporter=fault_reporter)
+        runtime_cfg=runtime_cfg,
+        profile=cycle_profile,
+        cabins_cfg=cabins_cfg,
+        products_cfg=products_cfg,
+        polling_engine=polling_engine,
+        fsm_manager=fsm_manager,
+        m1_model=m1_model,
+        m2_model=m2_model,
+        db_logger=db_logger,
+        result_sender=result_sender,
+        alarm_pusher=alarm_pusher,
+        health_checker=health_checker,
+        fault_reporter=fault_reporter,
+    )
 
     # Auto-start processing
     proc_loop.start()
 
     status_reporter = StatusReporter(
-        proc_loop, db_logger, polling_engine, model, fault_reporter)
+        proc_loop, db_logger, polling_engine, m1_model, fault_reporter)
 
     # ── Suppress console during init, show banner ──────────────────
     set_console_mode("silent")
@@ -227,8 +282,8 @@ def main():
     _print_banner(
         mode=args.mode,
         plc_connected=polling_engine.plc_connected,
-        model_loaded=model.loaded,
-        model_version=model.version if model.loaded else "",
+        model_loaded=m1_model.loaded,
+        model_version=m1_model.version if m1_model.loaded else "",
         active_start=active_start,
         active_end=active_end)
 
@@ -247,6 +302,9 @@ def main():
         print("\n  正在关闭系统...")
         status_reporter.stop()
         proc_loop.stop()
+        # Flush pending writebacks BEFORE polling stops so the writer thread
+        # can still grab _io_lock from a live S7 connection.
+        result_sender.shutdown()
         health_checker.stop()
         api_server.stop()
         polling_engine.stop()

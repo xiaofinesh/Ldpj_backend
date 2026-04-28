@@ -1,13 +1,13 @@
-# 运行时参数配置 (v2.5 — 固定点数采集)
+# 运行时参数配置 (v2.6)
 #
 # 压力标度: 0 = 常压, ~600 = 满真空 (正值真空度)
 # 角度标度: RT_Angle 0~360°, 每工位 14.4°
 #
-# 采集策略 (v2.5):
-#   RT_Angle 越过 start_angle (100°) → 开始采集
-#   每 100ms 采集一个点, 固定采集 collection_points (36) 个
-#   备用结束: 角度先到 end_angle (276°) 就提前结束
-#   超时 → FAULT
+# v2.6 引入"配方系统"(cycle_profiles): 一个 profile 描述特定产量档位下的全部时序参数。
+# 当前只填一档(13000 瓶/小时,周期 6900ms),未来可扩展或改为从 PLC 读取。
+#
+# 任务 1 阶段: 同时保留旧的 cycle_detection 段(由 FSM 读取),与新的 cycle_profiles 并存。
+# 任务 2 完成后, cycle_detection 整段废弃,FSM 改读 CycleProfile 对象。
 
 logging:
   level: INFO
@@ -18,15 +18,52 @@ logging:
     backup_count: 5
 
 # ── 标签定义 ────────────────────────────────────────────────
-# label =  1: OK (正常)
+# label =  1: OK   (正常)
 # label =  0: LEAK (漏液)
-# label = -1: N/A (模型未加载)
+# label = -1: N/A  (模型未加载或异常)
 # label = -2: NO_BOTTLE (无瓶子, max < 50)
+
+# ── 周期配方系统 (v2.6 新增) ────────────────────────────────
+active_profile: "bph_13000"
+
+cycle_profiles:
+  bph_13000:
+    description: "13000 瓶/小时, 周期 6900ms"
+    bph: 13000
+    cycle_total_ms: 6900
+
+    # 6 段角度边界(°),按转盘 0°~360° 划分
+    # 段名 → [起始角度, 结束角度)
+    sections:
+      baseline_pre:  [0.0,   57.6]    # 瓶进、压紧、常压基线
+      evac:          [57.6,  93.0]    # 抽真空段
+      stable:        [93.0,  115.0]   # 稳定段
+      hold:          [115.0, 273.6]   # 保压检测段(主信号)
+      release:       [273.6, 302.4]   # 破真空段
+      baseline_post: [302.4, 360.0]   # 瓶出、常压归零
+
+    # 采集参数
+    collection:
+      trigger_angle: 0.0            # 采集触发角度(整圈起点)
+      points: 70                    # 采集点数
+      interval_s: 0.1               # 采样间隔(秒)
+      timeout_s: 10.0               # 采集超时(秒)
+
+    # 主信号段(M1 线性回归用此段计算 trend_slope)
+    primary_section: "hold"
 
 # ── 模型推理 ──────────────────────────────────────────────────
 model_inference:
-  # 模型推理阈值
+  # v2.5 二分类阈值(任务 8 完成后废弃)
   threshold: 0.284271
+
+  # v2.6 系统分辨率 A (Pa·m³/s); Q_est 低于 A 时不参与判决
+  a_resolution: 1.0e-5
+
+  # v2.6 M1/M2 不一致告警阈值(相对差)
+  m_disagreement_threshold: 0.20
+
+# v2.5 兼容字段
 feature_mode: "7d"
 feature_order_7d:
   - max
@@ -40,24 +77,18 @@ feature_order_7d:
 # 无瓶子判定: 压力最大值 < 此阈值 → label=-2, 跳过推理
 no_bottle_threshold: 50.0
 
-# ── 测试周期检测 (v2.5 固定点数) ───────────────────────────
+# ── 测试周期检测 (v2.5 旧版, 任务 2 后废弃) ────────────────
+# 任务 1 阶段保留, FSM 仍按这套参数运行
 cycle_detection:
-  # 采集开始角度 (°): RT_Angle 上升沿穿越此值触发采集
   start_angle: 100.0
-
-  # 固定采集点数: 每 200ms 一个点, 15 个 = 3.0s
   collection_points: 15
-
-  # 采集间隔 (秒): 两个采样点之间的最小间隔
-  collection_interval_s: 0.2
-
-  # 超时 → FAULT (秒)
+  collection_interval_s: 0.1
   collection_timeout_s: 8.0
 
 # ── 数据库 ──────────────────────────────────────────────────
 database:
   path: ldpj_data.db
-  max_size_mb: 500
+  max_size_mb: 1000
 
 # ── 主循环 ──────────────────────────────────────────────────
 loop_interval: 0.05

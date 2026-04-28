@@ -74,6 +74,33 @@ mkdir -p "$PROJECT_DIR/models/artifacts/archive"
 mkdir -p "$PROJECT_DIR/logs"
 chmod +x "$PROJECT_DIR/scripts/"*.sh 2>/dev/null || true
 
+# ── 5b-pre. v2.6 PLC 字段语义变更确认 ──────────────────────────────────
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo "  ⚠ v2.6 PLC 字段语义变更"
+echo "═══════════════════════════════════════════════════════════════"
+echo "  cabinHealthStatus (REAL @ DB9 +14) 在 v2.6 起承载 Q_est"
+echo "  单位: Pa·m³/s   典型范围: 1e-7 ~ 1e-2"
+echo "  v2.5 时该字段为 [0,1] 正常概率"
+echo ""
+echo "  字节格式不变, 但 HMI 显示逻辑必须同步切换。"
+echo "  否则上线瞬间操作员将看到 '健康度从 95% 跌到 0.001'。"
+echo ""
+if [ -n "${LDPJ_SKIP_HMI_CONFIRM:-}" ]; then
+    echo "  [LDPJ_SKIP_HMI_CONFIRM 已设置, 跳过确认]"
+else
+    read -r -p "  HMI 已确认支持 Q_est 显示? (y/N): " hmi_ack
+    case "${hmi_ack:-N}" in
+        y|Y|yes|YES|Yes) ;;
+        *)
+            echo ""
+            echo "  请先协调自控/HMI 团队后再继续。退出。"
+            echo "  自动化场景可设置 LDPJ_SKIP_HMI_CONFIRM=1 跳过此提示。"
+            exit 1
+            ;;
+    esac
+fi
+
 # ── 5b. 自动部署最新模型版本到 current/ (如果 current/ 缺失模型文件) ──
 echo ""
 echo "--- 检查模型部署 ---"
