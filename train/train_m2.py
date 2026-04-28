@@ -2,7 +2,7 @@
 
 Two-pass training with feature selection:
 
-  Pass 1: train on all 43 features → use gain importance to rank.
+  Pass 1: train on all 36 features → use gain importance to rank.
   Pass 2: keep top-K, refit a fresh StandardScaler on the reduced
           input, retrain with the same hyperparameters.
 
@@ -38,7 +38,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.feature_spec import FEATURE_ORDER_43D
+from core.feature_spec import FEATURE_ORDER_36D
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -98,9 +98,9 @@ def main(argv=None) -> int:
     if len(df_train) == 0 or len(df_test) == 0:
         sys.exit("ERROR: empty train or test split (check holdout-round)")
 
-    # Extract full 43-dim features
-    X_train = extract_features(df_train, FEATURE_ORDER_43D)
-    X_test = extract_features(df_test, FEATURE_ORDER_43D)
+    # Extract full 36-dim features
+    X_train = extract_features(df_train, FEATURE_ORDER_36D)
+    X_test = extract_features(df_test, FEATURE_ORDER_36D)
 
     # Target: log10(Q), with Q clipped to a finite, monotonically meaningful range
     y_train_q = np.clip(df_train["q_measured"].to_numpy(), 1e-7, 1.0)
@@ -108,11 +108,11 @@ def main(argv=None) -> int:
     y_train = np.log10(y_train_q)
     y_test = np.log10(y_test_q)
 
-    # ── Pass 1: full 43d for importance ranking ───────────────────
+    # ── Pass 1: full 36d for importance ranking ───────────────────
     scaler_full = StandardScaler().fit(X_train)
     X_train_s = scaler_full.transform(X_train)
 
-    logger.info("Pass 1: training on all 43 features for gain ranking")
+    logger.info("Pass 1: training on all 36 features for gain ranking")
     booster_full = xgb.train(
         params={
             "max_depth": args.max_depth,
@@ -122,7 +122,7 @@ def main(argv=None) -> int:
             "verbosity": 0,
             "seed": args.seed,
         },
-        dtrain=xgb.DMatrix(X_train_s, label=y_train, feature_names=FEATURE_ORDER_43D),
+        dtrain=xgb.DMatrix(X_train_s, label=y_train, feature_names=FEATURE_ORDER_36D),
         num_boost_round=args.n_estimators,
     )
 
@@ -135,7 +135,7 @@ def main(argv=None) -> int:
     logger.info("Top-%d features (head): %s", args.top_k_features, top_k_names[:5])
 
     # ── Pass 2: refit scaler on selected raw features, retrain ────
-    feature_indices = [FEATURE_ORDER_43D.index(name) for name in top_k_names]
+    feature_indices = [FEATURE_ORDER_36D.index(name) for name in top_k_names]
     X_train_sel_raw = X_train[:, feature_indices]
     X_test_sel_raw = X_test[:, feature_indices]
     scaler_sel = StandardScaler().fit(X_train_sel_raw)

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from core.exceptions import ModelLoadError, ModelPredictError
-from core.feature_spec import FEATURE_ORDER_43D
+from core.feature_spec import FEATURE_ORDER_36D
 from models.xgb_regressor_m2 import XGBRegressorM2
 
 
@@ -28,7 +28,7 @@ def _train_synthetic_m2(tmp_path: Path, *,
     from sklearn.preprocessing import StandardScaler
 
     if feature_subset is None:
-        feature_subset = list(FEATURE_ORDER_43D)
+        feature_subset = list(FEATURE_ORDER_36D)
 
     n_feat = len(feature_subset)
     rng = np.random.default_rng(42)
@@ -78,13 +78,13 @@ def _cfg(model_path, scaler_path, meta_path, base_dir, version="test_v1"):
 # ── Load paths ────────────────────────────────────────────────────────
 
 class TestLoad:
-    def test_load_full_43d(self, tmp_path):
+    def test_load_full_36d(self, tmp_path):
         mp, sp, mt = _train_synthetic_m2(tmp_path)
         m2 = XGBRegressorM2(_cfg(mp, sp, mt, tmp_path), base_dir=tmp_path)
         m2.load()
         assert m2.loaded is True
         assert m2.version == "test_v1"
-        assert len(m2.feature_subset) == 43
+        assert len(m2.feature_subset) == 36
         assert m2.log_space is True
 
     def test_load_missing_model_raises_modelloaderror(self, tmp_path):
@@ -123,13 +123,13 @@ class TestLoad:
         assert m2.loaded is False
 
     def test_load_without_metadata_falls_back_to_full(self, tmp_path):
-        """If metadata is absent, M2 assumes full 43-dim + log_space."""
+        """If metadata is absent, M2 assumes full 36-dim + log_space."""
         mp, sp, mt = _train_synthetic_m2(tmp_path)
         mt.unlink()  # delete metadata
         m2 = XGBRegressorM2(_cfg(mp, sp, mt, tmp_path), base_dir=tmp_path)
         m2.load()
         assert m2.loaded
-        assert len(m2.feature_subset) == 43
+        assert len(m2.feature_subset) == 36
         assert m2.log_space is True
 
 
@@ -140,7 +140,7 @@ class TestPredict:
         mp, sp, mt = _train_synthetic_m2(tmp_path)
         m2 = XGBRegressorM2(_cfg(mp, sp, mt, tmp_path), base_dir=tmp_path)
         m2.load()
-        result = m2.predict([0.5] * 43)
+        result = m2.predict([0.5] * 36)
         assert result["valid"] is True
         # Synthetic relation: log10(Q) ≈ -3 + 2*0.5 = -2 → Q ≈ 1e-2
         assert result["q_est"] > 0.0
@@ -156,17 +156,17 @@ class TestPredict:
     def test_predict_when_not_loaded(self, tmp_path):
         """Calling predict before load returns valid=False, doesn't crash."""
         m2 = XGBRegressorM2({}, base_dir=tmp_path)
-        result = m2.predict([0.5] * 43)
+        result = m2.predict([0.5] * 36)
         assert result == {"q_est": 0.0, "valid": False}
 
     def test_subset_prediction_uses_internal_indices(self, tmp_path):
-        """Caller always passes 43-dim; M2 selects subset internally."""
+        """Caller always passes 36-dim; M2 selects subset internally."""
         subset = ["hold_max", "hold_trend_slope", "cavity_id"]
         mp, sp, mt = _train_synthetic_m2(tmp_path, feature_subset=subset)
         m2 = XGBRegressorM2(_cfg(mp, sp, mt, tmp_path), base_dir=tmp_path)
         m2.load()
         # 43-dim input — model only consumes 3 of them
-        result = m2.predict([0.5] * 43)
+        result = m2.predict([0.5] * 36)
         assert result["valid"] is True
 
     def test_log_space_disabled_returns_raw_value(self, tmp_path):
@@ -175,7 +175,7 @@ class TestPredict:
         m2 = XGBRegressorM2(_cfg(mp, sp, mt, tmp_path), base_dir=tmp_path)
         m2.load()
         assert m2.log_space is False
-        result = m2.predict([0.5] * 43)
+        result = m2.predict([0.5] * 36)
         # Synthetic linear-space target: Q ≈ 1e-3 * 0.5 = 5e-4 (small, positive)
         assert result["valid"] is True
         # Should be a small positive number (no 10** transform)
@@ -187,7 +187,7 @@ class TestPredict:
         m2 = XGBRegressorM2(_cfg(mp, sp, mt, tmp_path), base_dir=tmp_path)
         m2.load()
         # Even with absurd inputs, q_est must be finite and bounded
-        result = m2.predict([1e6] * 43)
+        result = m2.predict([1e6] * 36)
         assert result["valid"] is True
         assert result["q_est"] <= 1.0  # log10(Q) clamped at 0 → Q <= 1
         assert result["q_est"] > 0.0

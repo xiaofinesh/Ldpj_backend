@@ -1,4 +1,4 @@
-"""Unit tests for core.quality_flags (v2.6)."""
+"""Unit tests for core.quality_flags (v2.6.1, 5 sections)."""
 
 import sys
 from pathlib import Path
@@ -18,7 +18,6 @@ from core.quality_flags import (
     QF_SHORT_EVAC,
     QF_SHORT_HOLD,
     QF_SHORT_RELEASE,
-    QF_SHORT_STABLE,
     compute_quality_flags,
 )
 
@@ -30,12 +29,11 @@ def profile():
         bph=13000,
         cycle_total_ms=6900,
         sections={
-            "baseline_pre":  (0.0,   57.6),
-            "evac":          (57.6,  93.0),
-            "stable":        (93.0,  115.0),
-            "hold":          (115.0, 273.6),
-            "release":       (273.6, 302.4),
-            "baseline_post": (302.4, 360.0),
+            "baseline_pre":  (0.0,   75.0),
+            "evac":          (75.0,  90.0),
+            "hold":          (90.0,  290.0),
+            "release":       (290.0, 304.0),
+            "baseline_post": (304.0, 360.0),
         },
         trigger_angle=0.0,
         collection_points=70,
@@ -65,7 +63,6 @@ class TestComputeQualityFlags:
         assert flags & QF_SHORT_HOLD
         # Other empty sections also flagged
         assert flags & QF_SHORT_EVAC
-        assert flags & QF_SHORT_STABLE
         assert flags & QF_SHORT_RELEASE
         assert flags & QF_SHORT_BASELINE_POST
         # baseline_pre HAS data so its bit is NOT set
@@ -75,12 +72,12 @@ class TestComputeQualityFlags:
 
     def test_completely_degenerate_input_sets_all_section_bits_and_qf_degenerate(self, profile):
         """compute_features_v26 with n<2 returns all-zero feats — every
-        section count is 0, so all 6 short-section bits + QF_DEGENERATE_INPUT
+        section count is 0, so all 5 short-section bits + QF_DEGENERATE_INPUT
         are set."""
         feats = compute_features_v26([], [], cavity_id=1, profile=profile)
         flags = compute_quality_flags(feats)
         assert flags & QF_DEGENERATE_INPUT
-        for bit in (QF_SHORT_BASELINE_PRE, QF_SHORT_EVAC, QF_SHORT_STABLE,
+        for bit in (QF_SHORT_BASELINE_PRE, QF_SHORT_EVAC,
                     QF_SHORT_HOLD, QF_SHORT_RELEASE, QF_SHORT_BASELINE_POST):
             assert flags & bit
 
@@ -88,7 +85,7 @@ class TestComputeQualityFlags:
         """QF_CD_CLAMPED is set externally; compute_quality_flags never sets it."""
         # Synthetic feats with all section counts >= 2 and the bit explicitly OR'd in
         feats = {f"{s}_count": 10 for s in (
-            "baseline_pre", "evac", "stable", "hold", "release", "baseline_post"
+            "baseline_pre", "evac", "hold", "release", "baseline_post"
         )}
         # compute_quality_flags doesn't touch this bit
         assert compute_quality_flags(feats) == 0

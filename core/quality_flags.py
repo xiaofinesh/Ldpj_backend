@@ -1,4 +1,4 @@
-"""Per-cycle data-quality bit flags (v2.6).
+"""Per-cycle data-quality bit flags (v2.6.1).
 
 Each completed cycle gets a single 32-bit integer in the DB whose bits
 flag silently-degraded computations (short sections, clamped formulas,
@@ -9,13 +9,18 @@ Bit layout (1 << N):
     0  QF_DEGENERATE_INPUT     full cycle had < 2 points
     1  QF_SHORT_BASELINE_PRE   section had < 2 points
     2  QF_SHORT_EVAC
-    3  QF_SHORT_STABLE
-    4  QF_SHORT_HOLD           ← M1 critical: hold_trend_slope unreliable
-    5  QF_SHORT_RELEASE
-    6  QF_SHORT_BASELINE_POST
+    3  QF_SHORT_HOLD           ← M1 critical: hold_trend_slope unreliable
+    4  QF_SHORT_RELEASE
+    5  QF_SHORT_BASELINE_POST
+    6  (reserved)
     7  QF_CD_CLAMPED           q_d_conversion C_d hit [0.5, 0.95] limit
                                 (set externally by ResultSender / API
                                  path that calls q_to_d_choked)
+
+Note: v2.6 had a QF_SHORT_STABLE bit at position 3. v2.6.1 dropped the
+"stable" segment from SECTION_NAMES (real production data showed it was
+an artifact). The bit was repurposed for QF_SHORT_HOLD; legacy DB rows
+written before the migration may have bit 3 set with the old meaning.
 """
 
 from __future__ import annotations
@@ -25,17 +30,16 @@ from typing import Dict, Mapping
 QF_DEGENERATE_INPUT      = 1 << 0
 QF_SHORT_BASELINE_PRE    = 1 << 1
 QF_SHORT_EVAC            = 1 << 2
-QF_SHORT_STABLE          = 1 << 3
-QF_SHORT_HOLD            = 1 << 4
-QF_SHORT_RELEASE         = 1 << 5
-QF_SHORT_BASELINE_POST   = 1 << 6
+QF_SHORT_HOLD            = 1 << 3
+QF_SHORT_RELEASE         = 1 << 4
+QF_SHORT_BASELINE_POST   = 1 << 5
+# bit 6 reserved
 QF_CD_CLAMPED            = 1 << 7
 
 # Section name → bit. Order MUST match SECTION_NAMES in cycle_profile.py.
 _SECTION_BITS: Dict[str, int] = {
     "baseline_pre":  QF_SHORT_BASELINE_PRE,
     "evac":          QF_SHORT_EVAC,
-    "stable":        QF_SHORT_STABLE,
     "hold":          QF_SHORT_HOLD,
     "release":       QF_SHORT_RELEASE,
     "baseline_post": QF_SHORT_BASELINE_POST,
@@ -43,7 +47,7 @@ _SECTION_BITS: Dict[str, int] = {
 
 
 def compute_quality_flags(feats: Mapping[str, float]) -> int:
-    """Inspect a 43-dim feats dict and return the section-quality bitmask.
+    """Inspect a 36-dim feats dict and return the section-quality bitmask.
 
     Looks at each section's ``*_count`` field; bit set if the section had
     fewer than 2 points (slope/variance unreliable in that section).

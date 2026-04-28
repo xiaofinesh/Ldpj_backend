@@ -39,22 +39,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from core.cycle_profile import CycleProfile, SECTION_NAMES
 from core.curve_segmenter import segment_by_angle
 from core.features import compute_features_v26
-from core.feature_spec import FEATURE_ORDER_43D
+from core.feature_spec import FEATURE_ORDER_36D
 
 
 def _default_profile() -> CycleProfile:
-    """Production-like profile with the standard 6 sections."""
+    """Production-like profile with the v2.6.1 standard 5 sections."""
     return CycleProfile(
         profile_id="bph_13000",
         bph=13000,
         cycle_total_ms=6900,
         sections={
-            "baseline_pre":  (0.0,   57.6),
-            "evac":          (57.6,  93.0),
-            "stable":        (93.0,  115.0),
-            "hold":          (115.0, 273.6),
-            "release":       (273.6, 302.4),
-            "baseline_post": (302.4, 360.0),
+            "baseline_pre":  (0.0,   75.0),
+            "evac":          (75.0,  90.0),
+            "hold":          (90.0,  290.0),
+            "release":       (290.0, 304.0),
+            "baseline_post": (304.0, 360.0),
         },
         trigger_angle=0.0,
         collection_points=70,
@@ -94,25 +93,26 @@ def _generate_one_cycle(
     q_truth = max(q_truth, 1e-6)
 
     pressures = np.zeros(n, dtype=np.float64)
+    # 5-section v2.6.1 boundaries: 0/75/90/290/304/360
+    # ~39 samples land in hold (90°-290°) at 70 pts/360°.
+    hold_n_samples_estimate = (290.0 - 90.0) / 360.0 * n  # ≈ 38.9
     for i, a in enumerate(angles):
-        if a < 57.6:                     # baseline_pre
+        if a < 75.0:                     # baseline_pre
             p = p_atm_mbar
-        elif a < 93.0:                   # evac (linear ramp)
-            frac = (a - 57.6) / (93.0 - 57.6)
+        elif a < 90.0:                   # evac (linear ramp 0 → 600 mbar)
+            frac = (a - 75.0) / (90.0 - 75.0)
             p = p_atm_mbar + frac * (p_vac_mbar - p_atm_mbar)
-        elif a < 115.0:                  # stable
-            p = p_vac_mbar
-        elif a < 273.6:                  # hold (slow decay)
-            steps_in_hold = (a - 115.0) / (273.6 - 115.0) * 32  # ~32 samples in hold
+        elif a < 290.0:                  # hold (slow decay)
+            steps_in_hold = (a - 90.0) / (290.0 - 90.0) * hold_n_samples_estimate
             p = p_vac_mbar + slope_hold_mbar_per_sample * steps_in_hold
-        elif a < 302.4:                  # release (linear ramp back)
-            frac = (a - 273.6) / (302.4 - 273.6)
+        elif a < 304.0:                  # release (linear ramp back)
+            frac = (a - 290.0) / (304.0 - 290.0)
             p = p_vac_mbar + frac * (p_atm_mbar - p_vac_mbar)
         else:                            # baseline_post
             p = p_atm_mbar
         pressures[i] = p + rng.normal(0, 0.5)
 
-    # Compute the v2.6 43-dim features (so M2 trainer has its 'features' col)
+    # Compute the v2.6.1 36-dim features (so M2 trainer has its 'features' col)
     feats = compute_features_v26(pressures.tolist(), angles.tolist(),
                                  cabin_id, profile)
 

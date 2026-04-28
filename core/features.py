@@ -1,9 +1,10 @@
 """Feature computation for Ldpj_backend.
 
-v2.6 (current): 43-dimensional feature contract — pressure curve is
-segmented into 6 sections by angle, 7 statistics per section, plus
-cavity_id as the 43rd feature. See ``core.feature_spec`` for the canonical
-ordering.
+v2.6.1 (current): 36-dimensional feature contract — pressure curve is
+segmented into 5 sections by angle, 7 statistics per section, plus
+cavity_id as the 36th feature. See ``core.feature_spec`` for the canonical
+ordering. The "stable" segment from v2.6 was merged into hold based on
+real production data showing the trend slope is continuous.
 
 v2.5 (deprecated, retained for legacy callers and migration tests):
 the 7-dim contract ``[max, min, difference, average, variance, trend_slope,
@@ -35,14 +36,14 @@ import numpy as np
 
 from core.cycle_profile import CycleProfile, SECTION_NAMES
 from core.curve_segmenter import segment_by_angle
-from core.feature_spec import FEATURE_ORDER_43D
+from core.feature_spec import FEATURE_ORDER_36D
 
 logger = logging.getLogger(__name__)
 
 
 # Pre-built tuple so list comprehensions in features_to_vector skip the
 # attribute lookup on every call.
-_FEATURE_ORDER_43D_T: tuple = tuple(FEATURE_ORDER_43D)
+_FEATURE_ORDER_36D_T: tuple = tuple(FEATURE_ORDER_36D)
 _LEGACY_7D_ORDER: tuple = (
     "max", "min", "difference", "average",
     "variance", "trend_slope", "cavity_id",
@@ -120,7 +121,7 @@ def compute_features_v26(
     cavity_id: int,
     profile: CycleProfile,
 ) -> Dict[str, float]:
-    """Compute the 43-dim feature dict for one cycle (v2.6).
+    """Compute the 36-dim feature dict for one cycle (v2.6.1).
 
     Parameters
     ----------
@@ -135,7 +136,7 @@ def compute_features_v26(
 
     Returns
     -------
-    dict with 43 keys (see ``FEATURE_ORDER_43D``).
+    dict with 36 keys (see ``FEATURE_ORDER_36D``).
     """
     n = min(len(pressures), len(angles))
     if n < 2:
@@ -148,7 +149,7 @@ def compute_features_v26(
             "returning zero feats. Likely a comms hiccup or a stuck cabin.",
             n, cavity_id,
         )
-        feats = {name: 0.0 for name in FEATURE_ORDER_43D}
+        feats = {name: 0.0 for name in FEATURE_ORDER_36D}
         feats["cavity_id"] = float(cavity_id)
         return feats
 
@@ -170,17 +171,17 @@ def compute_features_v26(
     return feats
 
 
-def features_to_vector(feats: Dict[str, float], mode: str = "43d") -> List[float]:
+def features_to_vector(feats: Dict[str, float], mode: str = "36d") -> List[float]:
     """Convert a feature dict into a fixed-order vector.
 
-    v2.6 uses ``mode="43d"`` (default).
+    v2.6 uses ``mode="36d"`` (default).
     Legacy v2.5 modes ``"7d"``/``"6d"`` are retained for migration tests
     that haven't been rewritten.
     """
-    if mode == "43d":
+    if mode == "36d":
         # ``feats[k]`` is faster than ``feats.get(k, 0.0)`` and v2.6
-        # always populates all 43 keys via _compute_section_stats_arr.
-        return [feats[k] for k in _FEATURE_ORDER_43D_T]
+        # always populates all 36 keys via _compute_section_stats_arr.
+        return [feats[k] for k in _FEATURE_ORDER_36D_T]
     if mode == "7d":
         # Legacy callers may pass a v2.5 dict; .get keeps the contract
         # (missing keys → 0.0) so v2.5 unit tests still pass unchanged.
@@ -188,7 +189,7 @@ def features_to_vector(feats: Dict[str, float], mode: str = "43d") -> List[float
     if mode == "6d":
         return [feats.get(k, 0.0) for k in _LEGACY_6D_ORDER]
     raise ValueError(
-        f"Unsupported feature mode: {mode}. Use '43d' (or legacy '7d'/'6d')."
+        f"Unsupported feature mode: {mode}. Use '36d' (or legacy '7d'/'6d')."
     )
 
 

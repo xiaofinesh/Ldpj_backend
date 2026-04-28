@@ -3,7 +3,7 @@
 Pipeline per completed cycle:
     1. Drain new poll frames into the per-cabin FSMs.
     2. For each cabin in PROCESSING state:
-       a. Compute v2.6 43-dim features (segment-by-angle).
+       a. Compute v2.6.1 36-dim features (segment-by-angle, 5 sections).
        b. NO_BOTTLE early-out if hold_max < no_bottle_threshold.
        c. M1 (per-cabin linear regression) → q_est primary output.
        d. M2 (global XGBoost) when loaded → cross-check; raise F010 on
@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 from configs.loaders import is_cabin_calibrated
 from core.cycle_fsm import CycleFSMManager
 from core.cycle_profile import CycleProfile
-from core.feature_spec import FEATURE_ORDER_43D
+from core.feature_spec import FEATURE_ORDER_36D
 from core.features import compute_features_v26, features_to_vector
 from core.polling_engine import PollingEngine
 from core.quality_flags import QF_SHORT_HOLD, compute_quality_flags
@@ -288,11 +288,11 @@ class ProcessingLoop:
 
         t0 = time.perf_counter()
 
-        # ── Feature extraction (43-dim) ───────────────────────
+        # ── Feature extraction (36-dim) ───────────────────────
         feats = compute_features_v26(
             data.pressures, data.angles, cabin_id, self._profile,
         )
-        feature_vector = features_to_vector(feats, mode="43d")
+        feature_vector = features_to_vector(feats, mode="36d")
         duration_s = (data.timestamps[-1] - data.timestamps[0]) if len(data.timestamps) > 1 else 0.0
 
         # ── Per-cycle data-quality bitmask (for DB column) ────

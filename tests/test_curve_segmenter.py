@@ -1,4 +1,4 @@
-"""Tests for core.curve_segmenter (v2.6)."""
+"""Tests for core.curve_segmenter (v2.6.1, 5 sections)."""
 
 import sys
 from pathlib import Path
@@ -13,7 +13,7 @@ from core.curve_segmenter import segment_by_angle, segment_indices_by_angle
 
 @pytest.fixture
 def profile():
-    """Test profile with simple round-number boundaries (vs production 57.6/115/etc)."""
+    """Test profile with simple round-number boundaries (vs production 75/90/etc)."""
     return CycleProfile(
         profile_id="test",
         bph=13000,
@@ -21,8 +21,7 @@ def profile():
         sections={
             "baseline_pre":  (0.0,   60.0),
             "evac":          (60.0,  100.0),
-            "stable":        (100.0, 120.0),
-            "hold":          (120.0, 280.0),
+            "hold":          (100.0, 280.0),
             "release":       (280.0, 310.0),
             "baseline_post": (310.0, 360.0),
         },
@@ -36,15 +35,15 @@ def profile():
 
 class TestSegmentByAngle:
     def test_one_point_per_section(self, profile):
-        pressures = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
-        angles = [10.0, 70.0, 110.0, 200.0, 290.0, 320.0]
+        # 5 points, one per section
+        pressures = [10.0, 20.0, 30.0, 40.0, 50.0]
+        angles = [10.0, 70.0, 200.0, 290.0, 320.0]
         result = segment_by_angle(pressures, angles, profile)
         assert result["baseline_pre"] == [10.0]
         assert result["evac"] == [20.0]
-        assert result["stable"] == [30.0]
-        assert result["hold"] == [40.0]
-        assert result["release"] == [50.0]
-        assert result["baseline_post"] == [60.0]
+        assert result["hold"] == [30.0]
+        assert result["release"] == [40.0]
+        assert result["baseline_post"] == [50.0]
 
     def test_boundary_inclusive_left(self, profile):
         """A point exactly at start_angle belongs to that section."""
@@ -55,7 +54,7 @@ class TestSegmentByAngle:
     def test_boundary_exclusive_right(self, profile):
         """A point exactly at end_angle belongs to the NEXT section."""
         result = segment_by_angle([100.0], [100.0], profile)
-        assert result["stable"] == [100.0]
+        assert result["hold"] == [100.0]
         assert result["evac"] == []
 
     def test_out_of_range_dropped(self, profile):
@@ -94,14 +93,13 @@ class TestSegmentByAngle:
 
 class TestSegmentIndicesByAngle:
     def test_returns_indices(self, profile):
-        angles = [10.0, 70.0, 110.0, 200.0, 290.0, 320.0]
+        angles = [10.0, 70.0, 200.0, 290.0, 320.0]
         idx = segment_indices_by_angle(angles, profile)
         assert idx["baseline_pre"] == [0]
         assert idx["evac"] == [1]
-        assert idx["stable"] == [2]
-        assert idx["hold"] == [3]
-        assert idx["release"] == [4]
-        assert idx["baseline_post"] == [5]
+        assert idx["hold"] == [2]
+        assert idx["release"] == [3]
+        assert idx["baseline_post"] == [4]
 
     def test_useful_for_parallel_arrays(self, profile):
         """Demonstrate the documented use case: slicing parallel arrays."""
