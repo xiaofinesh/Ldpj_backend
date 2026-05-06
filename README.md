@@ -1,6 +1,6 @@
 # Ldpj_backend — 边缘 AI 漏液检测后端系统
 
-**版本**: v2.6
+**版本**: v2.6.2
 **平台**: Linux (Debian/Ubuntu), Python 3.11+, 树莓派 5 / x86 工控机
 **PLC**: 西门子 S7-1200/1500, DB_Global [DB9]
 
@@ -16,12 +16,14 @@ XGBoost）实时估计**漏率 Q (Pa·m³/s)**，与产品配置的 `Q_threshold
 ### 核心能力
 
 - **高频采集**: 10ms 轮询 25 个舱室；FSM 按 100ms 间隔取样、整圈 70 点
-- **角度触发**: RT_Angle 跨 0° 触发，覆盖整周期（baseline / evac / stable / hold / release / baseline）
-- **物理输出**: M1 主推理 `Q = β · dp/dt + α`（每舱独立标定）；M2 辅助 43 维 XGBoost 回归 + 一致性交叉校验
+- **角度触发**: RT_Angle 跨 0° 触发，覆盖整周期（5 段：baseline_pre / evac / hold / release / baseline_post）
+- **物理输出**: M1 主推理 `Q = β · dp/dt + α`（每舱独立标定）；M2 辅助 36 维 XGBoost 回归 + 一致性交叉校验
 - **客户判废**: 按产品 `Q_threshold` 直接出 LEAK / OK；可携带等效缺陷孔径 d (μm)
+- **NTP-jump 安全**: FSM 调度走 monotonic clock，墙钟跳变不影响 in-flight 采集
 - **异步写回**: PLC `cabinHealthStatus` 异步队列写回，多舱并发不阻塞采集
 - **数据服务**: FastAPI HTTP 接口，外部工控机查询历史/状态/健康
 - **告警推送**: 检测到泄漏 / M1-M2 不一致 / 未标定舱时主动推送告警
+- **数据质量位掩码**: 每条记录带 `quality_flags`，标记短段 / 退化输入 / clamp 等
 
 ### 压力标度
 
@@ -29,7 +31,7 @@ XGBoost）实时估计**漏率 Q (Pa·m³/s)**，与产品配置的 `Q_threshold
 RT_Pressure: 0 mbar = 常压 (无真空)
             ~600 mbar = 满真空 (正值越大真空度越高)
 
-保压阶段: ~645 mbar, 缓慢下降
+保压阶段: ~600 mbar, 缓慢下降
   正常密封: dp/dt ≈ 1–3 Pa/s   → Q ≈ 1e-4 Pa·m³/s
   泄漏:     dp/dt ≈ 30–300 Pa/s → Q ≈ 1e-2 Pa·m³/s
 ```
@@ -55,6 +57,9 @@ cd Ldpj_backend
 bash scripts/install.sh           # 自动部署最新模型版本到 current/
 source .venv/bin/activate
 ```
+
+> ⚠️ `install.sh` 会强制确认 HMI 已支持 `Q_est` 显示。CI / 自动化场景设
+> `LDPJ_SKIP_HMI_CONFIRM=1` 跳过。
 
 ### 2. Mock 模式 (开发测试, 无需 PLC)
 
@@ -87,7 +92,7 @@ python main.py --mode s7
 
 ## 数据采集 → 训练 → 部署
 
-v2.6 训练分三步：
+v2.6.2 训练分三步：
 
 ### 步骤 1：采集原始数据
 
@@ -96,8 +101,10 @@ python main.py --mode s7
 # 输入 s 开始采集；运行足够时间后输入 e 暂停；输入 x 导出 CSV
 ```
 
-导出 CSV 包含：`pressure_data`（70 点压力，JSON）、`angle_data`、`features`
-（43 维 JSON）、`leak_valve_status`、`cycle_profile_id` 等。
+导出 CSV 包含 v2.6 全部列：`pressure_data`（70 点压力，JSON）、
+`angle_data`、`features`（36 维 JSON）、`q_est`、`q_threshold`、
+`m1_q`、`m2_q`、`m_disagreement`、`quality_flags`、`product_id`、
+`cycle_profile_id`、`leak_valve_status` 等。
 
 ### 步骤 2：计算 Q_measured 标签
 
@@ -115,26 +122,29 @@ python -m train.prepare_q_data \
 ### 步骤 3：训练 M1 + M2
 
 ```bash
-# M1: 每舱线性回归 (主推理)
+# M1: 每舱线性回归 (主推理)，R² 不达标的舱自动剔除
 python -m train.train_m1 \
     --data train_data.csv \
-    --output models/artifacts/v2.6.0/m1_coefficients.json \
-    --version v2.6.0
+    --output models/artifacts/v2.6.2/m1_coefficients.json \
+    --version v2.6.2 \
+    --min-r2 0.99
 
 # M2: 全局 XGBoost 回归 + top-K 特征选择 (交叉校验)
 python -m train.train_m2 \
     --data train_data.csv \
-    --output models/artifacts/v2.6.0/ \
-    --version v2.6.0 \
+    --output models/artifacts/v2.6.2/ \
+    --version v2.6.2 \
     --top-k-features 20
 ```
 
 ### 步骤 4：部署
 
 ```bash
-bash scripts/deploy_model.sh models/artifacts/v2.6.0
+bash scripts/deploy_model.sh models/artifacts/v2.6.2
 python main.py --mode s7
 ```
+
+> ⚠️ `deploy_model.sh` 也会强制确认 HMI 已就绪（同一个 `LDPJ_SKIP_HMI_CONFIRM` 环境变量可跳过）。
 
 ### V_cabin 标定
 
@@ -147,24 +157,34 @@ python scripts/calibrate_v_cabin.py \
 # CV 超 2% 自动拒写; 历史记入 data/calibration_history/v_cabin_log.csv
 ```
 
+V_cabin = 215 mL 工况推荐 u_v_cabin ≤ 4 mL（≈ 2% 相对误差）。
+
 ---
 
-## 机械时序 / 6 段切割
+## 机械时序 / 5 段切割
 
 ```
 转盘: 25 工位, 一圈 ~6900ms (BPH 13000)
 
   ┌─ angle=0° (trigger): 整圈采集开始, 70 点 @ 100ms ─┐
-  │  baseline_pre [0°,57.6°)    瓶进、压紧、常压基线    │
-  │  evac         [57.6°,93°)   抽真空段                │
-  │  stable       [93°,115°)    稳定段                  │
-  │  hold         [115°,273.6°) ★保压检测段 (主信号)    │
-  │  release      [273.6°,302.4°) 破真空段              │
-  │  baseline_post[302.4°,360°) 瓶出、常压归零          │
-  └─ 7 秒后整圈采完 (角度归零兜底) ────────────────────┘
+  │  baseline_pre [0°,    75°)   瓶进、压紧、常压基线 │
+  │  evac         [75°,   90°)   抽真空 (压力 0 → ~600 mbar)│
+  │  hold         [90°,  290°)   ★保压检测段 (M1 主信号)  │
+  │  release      [290°, 304°)   破真空 (~600 → 0 mbar)   │
+  │  baseline_post[304°, 360°)   瓶出、常压归零            │
+  └─ 7 秒后整圈采完 (角度归零兜底, 95% / target-3 阈值) ─┘
 ```
 
-`hold` 段是 M1 计算 `trend_slope` 的主段。其它段贡献给 M2 的 43 维特征。
+边界来自 131808 真实数据 4 个转折点的 mode：
+- evac_start = 75°（压力首次脱离 0）
+- plateau_start = 90°（真空到达平台）
+- release_start = 290°（平台末端开始下降）
+- release_end = 304°（压力归零）
+
+v2.6 时曾有 stable 段（93°–115°），v2.6.1 起合并到 hold —— 实测斜率
+比 1.00 ± 0.0000，没有独立的物理瞬态。
+
+`hold` 段是 M1 计算 `trend_slope` 的主段。M2 用全部 36 维。
 
 ---
 
@@ -180,10 +200,10 @@ python scripts/calibrate_v_cabin.py \
 | +8 | RT_Angle | Real (4B) | 角度 (0~360°) |
 | +12.0 | leakTestResult_AI | Bool | AI 检测结果 (写回) |
 | +12.1 | leakTestResult_PLC | Bool | PLC 检测结果 |
-| +14 | **cabinHealthStatus** | Real (4B) | **v2.6: Q_est (Pa·m³/s)** |
+| +14 | **cabinHealthStatus** | Real (4B) | **v2.6+: Q_est (Pa·m³/s)** |
 | +18.0 | leakValveStatus | Bool | 验证阀状态 (标注用) |
 
-> ⚠️ **HMI 协调要求**：v2.5 时 `cabinHealthStatus` 是概率（0–1）；v2.6
+> ⚠️ **HMI 协调要求**：v2.5 时 `cabinHealthStatus` 是概率（0–1）；v2.6+
 > 改为漏率 Q（典型 1e-7 ~ 1e-2 Pa·m³/s）。**字节格式不变，但 HMI 显示
 > 逻辑必须同步切换**，否则上线瞬间用户会看到"健康度从 95% 跌到 0.001"。
 >
@@ -195,9 +215,9 @@ Cabin[0] 保留. 系统读取 Cabin[1]~Cabin[25].
 
 ---
 
-## 特征工程 (43 维)
+## 特征工程 (36 维)
 
-70 点压力曲线按角度切成 6 段，每段 7 个统计量 + cavity_id：
+70 点压力曲线按角度切成 5 段，每段 7 个统计量 + cavity_id：
 
 ```
 [
@@ -205,25 +225,49 @@ Cabin[0] 保留. 系统读取 Cabin[1]~Cabin[25].
   baseline_pre_average, baseline_pre_variance,
   baseline_pre_trend_slope, baseline_pre_count,
 
-  evac_*  (7),  stable_*  (7),
-  hold_*  (7),  ← M1 读 hold_trend_slope
-  release_* (7), baseline_post_* (7),
+  evac_*    (7),
+  hold_*    (7),  ← M1 读 hold_trend_slope
+  release_* (7),
+  baseline_post_* (7),
 
-  cavity_id     ← 第 43 维
+  cavity_id     ← 第 36 维
 ]
 ```
 
-`count` 是该段实际包含的点数（短段时仍可识别）。
+`count` 是该段实际包含的点数（短段时仍可识别，并触发 quality_flags 位）。
 
 ---
 
-## 推理流水线 (v2.6)
+## 数据质量位掩码 (`quality_flags`)
+
+每条 DB 记录带一个 32 位整数，标记本周期的"静默降级"事件。后续 ML
+分析可以 `WHERE quality_flags & 0x10 = 0` 直接筛"hold 段健康"的记录。
+
+| bit | 名称 | 含义 |
+|:---:|---|---|
+| 0 | `QF_DEGENERATE_INPUT` | 整圈 < 2 点（罕见，传感器/通信故障） |
+| 1 | `QF_SHORT_BASELINE_PRE` | 该段 < 2 点 |
+| 2 | `QF_SHORT_EVAC` | 该段 < 2 点 |
+| 3 | `QF_SHORT_HOLD` | ★ M1 关键段不可靠 |
+| 4 | `QF_SHORT_RELEASE` | 该段 < 2 点 |
+| 5 | `QF_SHORT_BASELINE_POST` | 该段 < 2 点 |
+| 6 | (reserved) | — |
+| 7 | `QF_CD_CLAMPED` | Q→d 换算的 C_d 被钳到 [0.5, 0.95] |
+
+> 历史兼容：v2.6 写过 `QF_SHORT_STABLE`（也是 bit 3）；v2.6.1 起 bit 3
+> 重排为 `QF_SHORT_HOLD`。读取迁移前的旧记录需按 created_at 区分语义。
+
+---
+
+## 推理流水线
 
 ```
 PLC --(10ms)--> polling_engine --> CycleFSM --(100ms × 70 点)--> CycleData
                                                                       |
                                                        compute_features_v26
-                                                              (43 维)
+                                                              (36 维)
+                                                                      |
+                                                          compute_quality_flags
                                                                       |
                                                             ┌────────┴────────┐
                                                             v                 v
@@ -236,17 +280,27 @@ PLC --(10ms)--> polling_engine --> CycleFSM --(100ms × 70 点)--> CycleData
                                                         v
                                               PLC 写回 cabinHealthStatus = Q_est
                                                   (异步队列, 每舱合并最新值)
+                                                        |
+                                                        v
+                                              SQLite (zlib BLOB) + HTTP 告警
 ```
 
-### v2.6 故障码
+### 故障码
 
 | 码 | 等级 | 触发条件 |
 |---|---|---|
-| F010 | WARNING | M1/M2 漏率估计相对差 > 阈值 (默认 20%) |
+| F001 | CRITICAL | PLC 连接丢失 |
+| F002 | ERROR | M1 模型未加载 |
+| F003 | WARNING | 传感器数据异常 |
+| F004 | WARNING | 推理延迟过高 |
+| F005 | ERROR | 磁盘空间不足 |
+| F006 | ERROR | 数据库写入失败 |
+| F007 | WARNING | 数据库容量告警（默认 ≥ 0.9 × `health.yaml::checks.database.max_size_mb`） |
+| F008 | CRITICAL | 采集线程异常终止 |
+| F009 | WARNING | 舱状态机卡死 (>120s 在 COLLECTING) |
+| F010 | WARNING | M1/M2 漏率估计相对差 > 阈值（默认 20%） |
 | F011 | WARNING | M1 表里没有该舱标定（fallback 到均值） |
-| F012 | INFO | Q_est 低于系统分辨率 A_resolution（不参与判决） |
-
-完整故障码定义见 `health/fault_codes.py`（F001-F009 来自 v2.5）。
+| F012 | INFO | Q_est 低于系统分辨率 A_resolution |
 
 ---
 
@@ -256,11 +310,15 @@ PLC --(10ms)--> polling_engine --> CycleFSM --(100ms × 70 点)--> CycleData
 |---|---|
 | `configs/plc.yaml` | PLC 连接 + DB9 映射 + 轮询参数 |
 | `configs/runtime.yaml` | `cycle_profiles` (周期配方) + `model_inference` + 数据库 |
-| `configs/models.yaml` | M1 / M2 / 旧 XGB 路径 |
-| `configs/cabins.yaml` | 25 舱 V_cabin 标定值 |
+| `configs/models.yaml` | M1 / M2 路径 |
+| `configs/cabins.yaml` | 25 舱 V_cabin 标定值 + 默认 fallback |
 | `configs/products.yaml` | 产品判废参数 (Q_threshold, flow_regime, l_ref_mm) |
-| `configs/health.yaml` | 健康检查参数 |
+| `configs/health.yaml` | 健康检查参数（含 `checks.database.max_size_mb`） |
 | `configs/ipc.yaml` | API server + 告警推送 |
+
+`configs/loaders.py::load_yaml` 区分两种失败：
+- **文件缺失** → 返回 `{}`（优雅降级，系统继续启动用默认值）
+- **YAML 语法错误** → 抛出异常（强制启动失败，避免静默用空配置启动）
 
 ---
 
@@ -272,11 +330,13 @@ Ldpj_backend/
 ├── configs/                      # YAML 配置 (见上表)
 ├── core/
 │   ├── polling_engine.py         # PLC 轮询 (monotonic-tick + seq) + Mock
-│   ├── cycle_fsm.py              # 整圈采集 FSM (无累积漂移)
-│   ├── cycle_profile.py          # 周期配方抽象 (BPH 档位)
-│   ├── curve_segmenter.py        # 按角度切 6 段
-│   ├── features.py               # 43 维特征 (闭式 OLS, 优化路径)
-│   ├── feature_spec.py           # FEATURE_ORDER_43D 常量
+│   ├── cycle_fsm.py              # 整圈采集 FSM (绝对目标 ts, monotonic clock)
+│   ├── cycle_profile.py          # 周期配方抽象 (BPH 档位, 5 段)
+│   ├── curve_segmenter.py        # 按角度切 5 段
+│   ├── features.py               # 36 维特征 (闭式 OLS, 优化路径)
+│   ├── feature_spec.py           # FEATURE_ORDER_36D 常量
+│   ├── quality_flags.py          # 数据质量位掩码
+│   ├── rate_limit.py             # 限流 warning helper
 │   ├── q_d_conversion.py         # Q ↔ d (laminar / choked) 双向换算
 │   ├── label_spec.py             # 标签 / 时序常量
 │   └── exceptions.py             # 自定义异常
@@ -298,16 +358,19 @@ Ldpj_backend/
 ├── health/                       # 健康自检 + 故障码定义
 ├── train/
 │   ├── prepare_q_data.py         # 计算 q_measured
-│   ├── train_m1.py               # M1 训练 (含 bootstrap 不确定度)
+│   ├── train_m1.py               # M1 训练 (含 bootstrap 不确定度 + R² 门控)
 │   ├── train_m2.py               # M2 训练 (top-K 特征选择)
 │   └── train_model.py            # [DEPRECATED] v2.5 二分类训练
 ├── scripts/
-│   ├── install.sh                # 在线安装 + 自动部署最新模型
-│   ├── deploy_model.sh           # 模型部署
+│   ├── install.sh                # 在线安装 + HMI 确认 + 自动部署
+│   ├── deploy_model.sh           # 模型部署 + HMI 确认
 │   └── calibrate_v_cabin.py      # V_cabin 标定 CLI
 ├── deploy/
 │   └── offline_install.sh        # 离线部署
-└── tests/                        # 单元 + 集成测试 (212 项)
+├── docs/
+│   ├── Ldpj_backend_architecture_v2.6.2.md  # v2.6.2 架构总览
+│   └── Ldpj_backend_*_v2.1.md               # 历史 v2.1 设计
+└── tests/                        # 单元 + 集成测试 (222 项)
 ```
 
 ---
@@ -318,12 +381,15 @@ Ldpj_backend/
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/records` | GET | 查询记录 (支持时间/舱号/标签过滤) |
-| `/records/{id}` | GET | 单条详情 (含解压后压力曲线) |
+| `/records` | GET | 查询记录列表 (含 q_est / q_threshold / quality_flags / 等 v2.6 列) |
+| `/records/{id}` | GET | 单条详情 (含解压后压力曲线 + 全量列) |
 | `/status` | GET | 系统状态 (M1/M2/PLC 加载情况) |
 | `/health` | GET | 健康报告 |
 
 Header: `X-API-Key: <your-key>`
+
+`/records/{id}` 返回的 `pressures` / `angles` 字段已是解码后的 list；
+压缩 BLOB 已被 strip。
 
 ---
 
@@ -331,7 +397,7 @@ Header: `X-API-Key: <your-key>`
 
 | 阶段 | μs |
 |---|---:|
-| `compute_features_v26` (43 维) | ~80 |
+| `compute_features_v26` (36 维) | ~80 |
 | `segment_by_angle` (70 点) | ~15 |
 | `compress_float_array` (70 点 zlib) | ~13 |
 | `M1.predict` | <1 |
@@ -339,7 +405,8 @@ Header: `X-API-Key: <your-key>`
 | **单舱完整推理** | **~150 μs** |
 | **25 舱并发最坏情况** | **~3.7 ms** |
 
-10ms 轮询周期下还有 6+ ms 的余量。FSM 采用绝对目标 ts 调度，**无累积漂移**。
+10ms 轮询周期下还有 6+ ms 的余量。FSM 采用绝对目标 ts 调度（monotonic
+clock），**无累积漂移、NTP-jump 安全**。
 
 ---
 
@@ -347,11 +414,21 @@ Header: `X-API-Key: <your-key>`
 
 ```bash
 pytest tests/ -v
-# 212 passed
+# 222 passed
 ```
 
 涵盖：FSM 状态转换 / 特征计算 / 数据库 schema 与压缩 round-trip /
-M1+M2 推理路径 / 处理循环集成 / 异步写回 / Q↔d 换算 / 训练脚本端到端。
+M1+M2 推理路径 / 处理循环集成 / 异步写回 / Q↔d 换算 / quality_flags /
+训练脚本端到端。
+
+---
+
+## 版本历史
+
+- **v2.6.2** — 19-issue 审察修复（DB 阈值/告警消息/API BLOB/导出列/迁移异常处理 + monotonic clock + 死配置清理）
+- **v2.6.1** — 5 段重校准（dropped stable）, FEATURE_ORDER → 36 维, 边界依据 131808 真实数据
+- **v2.6** — 双轨 Q 回归 (M1+M2)，整圈 70 点采集，43 维特征，zlib 存储，HMI 强制确认
+- **v2.5** — XGBoost 二分类 + 7 维特征（已废弃，路径保留兼容）
 
 ---
 
