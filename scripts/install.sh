@@ -101,22 +101,24 @@ else
     esac
 fi
 
-# ── 5b. 自动部署最新模型版本到 current/ (如果 current/ 缺失模型文件) ──
+# ── 5b. 自动部署最新模型版本到 current/ (如果 current/ 缺失 M1 系数表) ──
+# v2.6: 以 m1_coefficients.json 为模型存在判据 (旧 v2.5 xgb_model.json 已废弃)。
 echo ""
 echo "--- 检查模型部署 ---"
-if [ ! -f "$PROJECT_DIR/models/artifacts/current/xgb_model.json" ]; then
+if [ ! -f "$PROJECT_DIR/models/artifacts/current/m1_coefficients.json" ]; then
     LATEST_VERSION=$(ls -1 "$PROJECT_DIR/models/artifacts/" 2>/dev/null \
-        | grep -E '^v[0-9]+\.[0-9]+$' | sort -V | tail -1)
-    if [ -n "$LATEST_VERSION" ] && [ -f "$PROJECT_DIR/models/artifacts/$LATEST_VERSION/xgb_model.json" ]; then
-        echo "current/ 缺失模型, 自动部署 $LATEST_VERSION ..."
+        | grep -vE '^(current|archive|optimized)$' | sort -V | tail -1)
+    if [ -n "$LATEST_VERSION" ] && [ -f "$PROJECT_DIR/models/artifacts/$LATEST_VERSION/m1_coefficients.json" ]; then
+        echo "current/ 缺失 M1 系数表, 自动部署 $LATEST_VERSION ..."
         bash "$PROJECT_DIR/scripts/deploy_model.sh" "models/artifacts/$LATEST_VERSION"
     else
-        echo "警告: current/ 缺失模型且未找到可部署版本."
-        echo "  系统将以 N/A 模式运行 (无 AI 推理)."
-        echo "  训练完成后运行: bash scripts/deploy_model.sh models/artifacts/<version>"
+        echo "警告: current/ 缺失 M1 系数表且未找到可部署的 v2.6 工件."
+        echo "  系统将以 N/A 模式运行 (无 Q 推理)."
+        echo "  标定完成后运行: bash scripts/deploy_model.sh models/artifacts/<version>"
+        echo "  (工件目录需含 m1_coefficients.json + m2 三件套)"
     fi
 else
-    echo "已部署: $(cat "$PROJECT_DIR/models/artifacts/current/metadata.json" 2>/dev/null | grep -oP '"version":\s*"\K[^"]+' || echo 'unknown')"
+    echo "已部署: $(python3 -c "import json;print(json.load(open('$PROJECT_DIR/models/artifacts/current/m1_coefficients.json'))['version'])" 2>/dev/null || echo 'unknown')"
 fi
 
 # ── 6. 验证 ────────────────────────────────────────────────────────────

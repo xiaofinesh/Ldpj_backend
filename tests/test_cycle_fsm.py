@@ -43,6 +43,30 @@ def _frame(ci, p, a=0.0, ts=None):
     )
 
 
+class TestGapGuard:
+    def test_sampling_gap_during_collecting_faults(self):
+        """A large acquisition gap (polling stalled for a reconnect) must FAULT
+        the cycle, not burst the backlog into a corrupt-coverage verdict."""
+        prof = _make_profile(collection_interval_s=0.1, collection_points=70)
+        fsm = CabinFSM(1, prof)
+        t0 = 1000.0
+        fsm.update(_frame(1, 600, 358.0, ts=t0))
+        fsm.update(_frame(1, 600, 2.0, ts=t0))      # trigger → COLLECTING
+        assert fsm.state == CycleState.COLLECTING
+        fsm.update(_frame(1, 600, 100.0, ts=t0 + 1.0))  # 0.9s gap (> 0.5s)
+        assert fsm.state == CycleState.FAULT
+
+    def test_small_jitter_does_not_fault(self):
+        prof = _make_profile(collection_interval_s=0.1, collection_points=70)
+        fsm = CabinFSM(1, prof)
+        t0 = 1000.0
+        fsm.update(_frame(1, 600, 358.0, ts=t0))
+        fsm.update(_frame(1, 600, 2.0, ts=t0))
+        fsm.update(_frame(1, 600, 10.0, ts=t0 + 0.1))   # on-cadence
+        fsm.update(_frame(1, 600, 18.0, ts=t0 + 0.21))  # 10ms jitter
+        assert fsm.state == CycleState.COLLECTING
+
+
 class TestTriggerLogic:
     def test_initial_state_idle(self):
         fsm = CabinFSM(1, _make_profile())

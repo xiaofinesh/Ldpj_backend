@@ -35,7 +35,9 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from core.operating_point import OperatingPoint
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,9 @@ class LinearRegressionM1:
         self._coefs: Dict[int, Dict[str, float]] = {}
         self._loaded = False
         self._primary_section: str = "hold"
+        # v2.6.3 operating-point binding (None for legacy artifacts).
+        self._operating_point: Optional[OperatingPoint] = None
+        self._rescaled = False  # idempotency guard for rescale_to_interval
 
     # ── public properties ─────────────────────────────────────────
 
@@ -97,12 +102,58 @@ class LinearRegressionM1:
         # Cabin IDs in JSON are strings; coerce back to int.
         raw = data.get("cabins", {}) or {}
         self._coefs = {int(k): v for k, v in raw.items()}
+
+        # v2.6.3: structured operating-point fingerprint (additive; legacy
+        # artifacts have no such block → stays None, gate treats as anomaly).
+        op = data.get("operating_point")
+        self._operating_point = OperatingPoint.from_fingerprint(op) if op else None
+        self._rescaled = False
         self._loaded = True
 
         logger.info(
-            "M1 loaded: version=%s, %d cabins, primary_section=%s",
+            "M1 loaded: version=%s, %d cabins, primary_section=%s, operating_point=%s",
             self._version, len(self._coefs), self._primary_section,
+            self._operating_point.profile_id if self._operating_point else "MISSING",
         )
+
+    @property
+    def operating_point(self) -> Optional[OperatingPoint]:
+        """The calibration operating point parsed from the artifact (or None)."""
+        return self._operating_point
+
+    def rescale_to_interval(self, interval_active: float) -> float:
+        """Deterministically rescale β/u_beta for a sampling-interval change.
+
+        Physics: hold_trend_slope is mbar/sample and |β| ∝ 1/interval_s, so for
+        an interval-only change (in-hold sample count preserved — the gate
+        checks this) the exact transform is::
+
+            β_active   = β_cal · (interval_cal / interval_active)
+            u_beta    scales identically
+            α, u_alpha unchanged (zero-slope intercept, interval-independent)
+
+        Idempotent (guarded). Returns the applied factor (1.0 = no-op). M1 only:
+        M2 (XGBoost tree splits on raw slope) has no closed-form rescale.
+        """
+        if self._operating_point is None:
+            logger.warning("M1.rescale_to_interval: no operating_point; skipped")
+            return 1.0
+        interval_cal = self._operating_point.interval_s
+        if interval_active <= 0 or interval_cal <= 0:
+            return 1.0
+        factor = interval_cal / interval_active
+        if self._rescaled or abs(factor - 1.0) < 1e-12:
+            return factor
+        for c in self._coefs.values():
+            c["beta"] = float(c["beta"]) * factor
+            if "u_beta" in c:
+                c["u_beta"] = float(c["u_beta"]) * factor
+        self._rescaled = True
+        logger.warning(
+            "M1 β rescaled ×%.6f for interval change (calibration=%.4fs → active=%.4fs)",
+            factor, interval_cal, interval_active,
+        )
+        return factor
 
     # ── inference ────────────────────────────────────────────────
 

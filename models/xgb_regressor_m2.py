@@ -26,11 +26,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 from core.exceptions import ModelLoadError, ModelPredictError
+from core.operating_point import OperatingPoint
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class XGBRegressorM2:
         self._model: Any = None
         self._scaler: Any = None
         self._loaded = False
+        self._disabled = False  # v2.6.3: set on operating-point mismatch (F013)
+        self._operating_point: Optional[OperatingPoint] = None
         self._log_space = True
         # Subset of FEATURE_ORDER_36D actually used by this model
         self._feature_subset: List[str] = []
@@ -75,11 +78,24 @@ class XGBRegressorM2:
 
     @property
     def loaded(self) -> bool:
-        return self._loaded
+        # A disabled M2 reports unloaded so processing_loop's `if m2.loaded`
+        # guard skips the cross-check (and F010) without any loop change.
+        return self._loaded and not self._disabled
 
     @property
     def version(self) -> str:
         return self._version
+
+    @property
+    def operating_point(self) -> Optional[OperatingPoint]:
+        """Calibration operating point parsed from m2_metadata.json (or None)."""
+        return self._operating_point
+
+    def disable(self, reason: str = "") -> None:
+        """Disable M2 (operating-point mismatch). ``loaded`` then returns False
+        so the cross-check is silently skipped. M2 is not linearly rescalable."""
+        self._disabled = True
+        logger.warning("M2 disabled: %s", reason or "operating-point mismatch")
 
     @property
     def feature_subset(self) -> List[str]:
@@ -122,12 +138,15 @@ class XGBRegressorM2:
                 self._version = meta.get("version", self._version)
                 self._feature_subset = list(meta.get("feature_subset") or FEATURE_ORDER_36D)
                 self._log_space = bool(meta.get("log_space", True))
+                op = meta.get("operating_point")
+                self._operating_point = OperatingPoint.from_fingerprint(op) if op else None
             else:
                 logger.warning(
                     "M2 metadata not found; assuming full 36-dim and log-space"
                 )
                 self._feature_subset = list(FEATURE_ORDER_36D)
                 self._log_space = True
+                self._operating_point = None
 
             # Pre-compute indices into the full 36-dim vector
             try:

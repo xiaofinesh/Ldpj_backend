@@ -24,10 +24,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs.loaders import (
+    assert_kts_consistency,
     load_active_cycle_profile,
     load_cabins_config,
     load_health_config, load_ipc_config, load_models_config,
     load_plc_config, load_products_config, load_runtime_config,
+    validate_operating_point,
+    validate_product_resolution,
 )
 from core.cycle_fsm import CycleFSMManager
 from core.logging_setup import setup_logging, set_console_mode
@@ -59,20 +62,30 @@ class StatusReporter:
         self._interval = interval
         self._thread = None
         self._running = False
+        self._stop_event = threading.Event()
 
     def start(self):
         if self._running:
             return
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="status-rpt")
         self._thread.start()
 
     def stop(self):
+        # Interruptible + joined: a plain flag left the old thread sleeping up to
+        # `interval` (30s) seconds, so rapid mode-toggling stacked live threads
+        # that double-printed heartbeats. Wake it and wait for it to exit.
         self._running = False
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
 
     def _loop(self):
         while self._running:
-            time.sleep(self._interval)
+            if self._stop_event.wait(self._interval):
+                break
             if not self._running:
                 break
             self._report()
@@ -195,6 +208,24 @@ def main():
         logger.warning("products.yaml missing: %s. Using defaults.", exc)
         products_cfg = {}
 
+    # ── 强制校验产品阈值 vs 系统分辨率 (README §5 / 部署说明 §3) ──────
+    # q_threshold 必须 > A(估计分辨率); 建议 ≥ A_det(检出分辨率)。
+    mi_cfg = runtime_cfg.get("model_inference", {}) or {}
+    a_estimate = float(mi_cfg.get("a_estimate", 9.0e-3))
+    a_det = float(mi_cfg.get("a_det", 1.56e-2))
+    thr_errors, thr_warnings = validate_product_resolution(
+        products_cfg, a_estimate, a_det)
+    for w in thr_warnings:
+        logger.warning("产品阈值建议: %s", w)
+    if thr_errors:
+        for e in thr_errors:
+            logger.error("产品阈值非法: %s", e)
+        print("  错误: 产品 Q_threshold 低于估计分辨率 A, 拒绝启动:")
+        for e in thr_errors:
+            print(f"    - {e}")
+        print("  请修正 configs/products.yaml 后重试。")
+        sys.exit(1)
+
     # ── Init subsystems ────────────────────────────────────────────
     fault_reporter = FaultReporter()
 
@@ -229,6 +260,40 @@ def main():
         m2_model.load()
     except Exception as exc:
         logger.warning("M2 not loaded: %s. Cross-check disabled.", exc)
+
+    # ── v2.6.3 工况门: 运行工况 ↔ 模型标定一致性 (README/部署说明 R01) ──
+    # 关闭"M1/M2 同向漂移、F010 无法察觉"的静默失配。仅在 M1 已加载时校验。
+    if m1_model.loaded:
+        active_op = cycle_profile.operating_point()
+        op_gate = validate_operating_point(
+            active_op, m1_model.operating_point, m2_model.operating_point)
+        for w in op_gate["warnings"]:
+            logger.warning("工况校验: %s", w)
+        if op_gate["errors"]:
+            for e in op_gate["errors"]:
+                logger.error("工况校验失败: %s", e)
+            print("  错误: 运行工况与模型标定不一致, 拒绝启动:")
+            for e in op_gate["errors"]:
+                print(f"    - {e}")
+            print("  请修正 runtime.yaml 工况, 或部署对应工况的模型后重试。")
+            sys.exit(1)
+        # 执行动作: M1 确定性重缩放(间隔变化, 采样数保持) / M2 禁用(不可重缩放)
+        if op_gate["m1_rescale_to"] is not None:
+            m1_model.rescale_to_interval(op_gate["m1_rescale_to"])
+        if op_gate["m2_disable_reason"]:
+            m2_model.disable(op_gate["m2_disable_reason"])
+        # k_ts 运行期不变量(重缩放后再校验 |β|/V_cabin 物理自洽)
+        kts_errors = assert_kts_consistency(m1_model, cabins_cfg, active_op)
+        if kts_errors:
+            for e in kts_errors:
+                logger.error("k_ts 自洽校验失败: %s", e)
+            print("  错误: M1 系数与 V_cabin 物理自洽性(k_ts)校验失败, 拒绝启动:")
+            for e in kts_errors:
+                print(f"    - {e}")
+            sys.exit(1)
+        # 抛出工况告警故障(F013 间隔重缩放/M2禁用; F014 真空失配)
+        for code, msg in op_gate["faults"]:
+            fault_reporter.raise_fault(code, msg)
 
     db_logger = DatabaseLogger(
         runtime_cfg.get("database", {}).get("path", "ldpj_data.db"))
@@ -297,11 +362,31 @@ def main():
         set_console_mode("normal")
         status_reporter.start()
 
+    # ── Processing thread (created before shutdown so shutdown can join it) ──
+    def _run_loop():
+        try:
+            while proc_loop.is_running:
+                proc_loop.run_once()
+        except Exception as exc:
+            logger.error("Processing loop crashed: %s", exc, exc_info=True)
+
+    loop_thread = threading.Thread(target=_run_loop, daemon=True, name="proc-loop")
+
     # ── Shutdown helper ────────────────────────────────────────────
+    _shutting_down = threading.Event()
+
     def shutdown():
+        # Guard against re-entrancy (SIGINT during shutdown, or 'q' then Ctrl-C).
+        if _shutting_down.is_set():
+            return
+        _shutting_down.set()
         print("\n  正在关闭系统...")
         status_reporter.stop()
         proc_loop.stop()
+        # Join the processing thread BEFORE closing the DB, so an in-flight
+        # log_record() can't run against a closed sqlite connection.
+        if loop_thread.is_alive():
+            loop_thread.join(timeout=2.0)
         # Flush pending writebacks BEFORE polling stops so the writer thread
         # can still grab _io_lock from a live S7 connection.
         result_sender.shutdown()
@@ -315,21 +400,23 @@ def main():
     signal.signal(signal.SIGINT, lambda s, f: shutdown())
     signal.signal(signal.SIGTERM, lambda s, f: shutdown())
 
-    # ── Processing in background thread ────────────────────────────
-    def _run_loop():
-        try:
-            while proc_loop.is_running:
-                proc_loop.run_once()
-        except Exception as exc:
-            logger.error("Processing loop crashed: %s", exc, exc_info=True)
-
-    loop_thread = threading.Thread(target=_run_loop, daemon=True, name="proc-loop")
     loop_thread.start()
 
     # ── Command loop (main thread) ─────────────────────────────────
     while True:
         try:
-            line = sys.stdin.readline().strip().lower()
+            raw = sys.stdin.readline()
+            if raw == "":
+                # EOF: stdin is closed (systemd/headless service — stdin is
+                # /dev/null). Do NOT busy-spin on readline() (100% CPU). Idle
+                # until a signal triggers shutdown; processing keeps running in
+                # the background thread.
+                logger.info("stdin EOF; idling (processing continues; "
+                            "send SIGTERM/SIGINT to stop)")
+                while not _shutting_down.is_set():
+                    time.sleep(3600)
+                break
+            line = raw.strip().lower()
             if not line:
                 continue
             cmd = line[0]

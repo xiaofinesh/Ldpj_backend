@@ -22,32 +22,32 @@ class TestMockConnection:
         assert not conn.connected
 
     def test_db_read_size(self):
-        conn = MockS7Connection(cabin_count=26, cabin_size=20)
+        conn = MockS7Connection(cabin_count=26, cabin_size=26)
         conn.connect()
-        data = conn.db_read(9, 0, 26 * 20)
-        assert len(data) == 520  # 26 cabins * 20 bytes
+        data = conn.db_read(9, 0, 26 * 26)
+        assert len(data) == 676  # 26 cabins * 26 bytes (v3 layout)
 
     def test_db_read_structure(self):
-        """Verify that each 20-byte chunk can be parsed."""
+        """Verify each 26-byte chunk parses to the v3 CabinParam layout."""
         import struct
-        conn = MockS7Connection(cabin_count=2, cabin_size=20)
+        conn = MockS7Connection(cabin_count=2, cabin_size=26)
         conn.connect()
-        data = conn.db_read(9, 0, 40)
-        # Parse first cabin (20 bytes)
+        data = conn.db_read(9, 0, 2 * 26)
         rt_ai = struct.unpack_from(">h", data, 0)[0]
         rt_pressure = struct.unpack_from(">f", data, 2)[0]
         rt_position = struct.unpack_from(">h", data, 6)[0]
         rt_angle = struct.unpack_from(">f", data, 8)[0]
-        bool_byte_12 = data[12]                                # AI flags
-        cabin_health = struct.unpack_from(">f", data, 14)[0]   # REAL
-        bool_byte_18 = data[18]                                # leakValveStatus
+        bool_byte_12 = data[12]                                 # +12.0 leakValveStatus
+        leak_rate = struct.unpack_from(">f", data, 14)[0]      # +14 leakRate
+        leak_hole = struct.unpack_from(">f", data, 18)[0]      # +18 leakHoleDiameter
+        cabin_health = struct.unpack_from(">f", data, 22)[0]   # +22 cabinHealthStatus
         assert isinstance(rt_ai, int)
         assert isinstance(rt_pressure, float)
         assert isinstance(rt_angle, float)
+        assert 0 <= bool_byte_12 <= 0x07                        # bits 0..2
+        assert isinstance(leak_rate, float)
+        assert isinstance(leak_hole, float)
         assert isinstance(cabin_health, float)
-        # flags byte is one of 0x00 / 0x01 / 0x02 / 0x03
-        assert 0 <= bool_byte_12 <= 0x03
-        assert 0 <= bool_byte_18 <= 0x03
 
 
 class TestPollingEngine:

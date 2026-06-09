@@ -27,7 +27,13 @@ M_AIR = 0.029          # molar mass, kg/mol
 R = 8.314              # universal gas constant, J/(mol·K)
 T_REF = 293.15         # reference temperature, K (= 20 °C)
 P_ATM = 101325.0       # atmospheric pressure, Pa
-P_VACUUM = 35000.0     # default chamber absolute pressure (≈ 350 mbar abs), Pa
+# Default chamber absolute pressure (≈ 350 mbar abs). This is a DORMANT seam:
+# q_to_d/d_to_q are not on any deployed verdict path (the live judgment compares
+# M1 q_est directly to q_threshold). The AUTHORITATIVE chamber pressure for the
+# active operating point is ``OperatingPoint.p_chamber_pa`` (runtime.yaml
+# cycle_profiles.<id>.vacuum.p_chamber_pa); when d-diameters are surfaced
+# (HMI dual-mode), callers must pass that value here instead of this default.
+P_VACUUM = 35000.0     # default/fallback only — see note above
 
 
 # ── Laminar (Hagen-Poiseuille with Sampson correction) ──────────────

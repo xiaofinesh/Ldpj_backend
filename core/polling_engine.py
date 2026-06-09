@@ -241,21 +241,23 @@ class MockS7Connection:
             else:  # OK
                 pressure = self._pressure_bases[i] + self.OK_SLOPE_PER_TICK * cp + random.gauss(0, self.OK_NOISE)
 
-            ai = int(pressure * 42.5)  # Approximate AI channel value
+            # Approximate AI channel value, clamped to signed-16-bit range so a
+            # rare high-σ pressure outlier can't raise struct.error on ">h".
+            ai = max(-32768, min(32767, int(pressure * 42.5)))
             position = int(angle / 14.4)
 
-            # +18: Bool byte — bit 0 = leakValveStatus
-            # LEAK cabins have their verification valve open
-            bool_18 = 0x01 if ct == "LEAK" else 0x00
+            # +12.0: leakValveStatus — LEAK cabins have their verification valve open
+            bool_12 = 0x01 if ct == "LEAK" else 0x00
 
-            # 20-byte CabinParam
-            buf += struct.pack(">h", ai)
-            buf += struct.pack(">f", pressure)
-            buf += struct.pack(">h", position)
-            buf += struct.pack(">f", angle)
-            buf += bytearray(2)                 # +12: Bool flags (AI writes here)
-            buf += struct.pack(">f", 0.0)       # +14: cabinHealthStatus
-            buf += bytes([bool_18, 0x00])       # +18: leakValveStatus + pad
+            # 26-byte CabinParam (v3 / DB_Global 2024)
+            buf += struct.pack(">h", ai)            # +0  RT_AI
+            buf += struct.pack(">f", pressure)      # +2  RT_Pressure
+            buf += struct.pack(">h", position)      # +6  RT_Position
+            buf += struct.pack(">f", angle)         # +8  RT_Angle
+            buf += bytes([bool_12, 0x00])           # +12 bool flags (bit0 valve) + pad(+13)
+            buf += struct.pack(">f", 0.0)           # +14 leakRate (edge writes)
+            buf += struct.pack(">f", 0.0)           # +18 leakHoleDiameter (edge writes)
+            buf += struct.pack(">f", 0.0)           # +22 cabinHealthStatus
 
         return buf
 
@@ -300,6 +302,10 @@ class PollingEngine:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        # Set by stop() to make the reconnect wait interruptible — otherwise an
+        # in-flight _try_reconnect would sleep the full interval and then
+        # re-open a live PLC connection AFTER stop() already disconnected.
+        self._stop_event = threading.Event()
         self._next_seq = 0   # monotonic counter assigned to PollFrame.seq
         self._stats = {"total_polls": 0, "errors": 0, "reconnects": 0,
                        "behind_ticks": 0}
@@ -373,6 +379,7 @@ class PollingEngine:
     def start(self) -> None:
         if self._running:
             return
+        self._stop_event.clear()
         self._conn.connect()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="plc-poller")
@@ -381,6 +388,7 @@ class PollingEngine:
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()   # abort any in-flight reconnect wait
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
         self._conn.disconnect()
@@ -434,7 +442,12 @@ class PollingEngine:
                     next_tick = time.monotonic()
 
     def _try_reconnect(self) -> None:
-        time.sleep(self._reconnect_interval)
+        # Interruptible: wait() returns True immediately if stop() fired, so we
+        # neither sleep the full interval nor reconnect during/after shutdown.
+        if self._stop_event.wait(self._reconnect_interval):
+            return
+        if not self._running:
+            return
         try:
             self._conn.connect()
             self._stats["reconnects"] += 1
@@ -454,9 +467,9 @@ class PollingEngine:
             chunk = raw[offset: offset + self._cabin_size]
             if len(chunk) < self._cabin_size:
                 break
-            # +18: Bool byte — bit 0 = leakValveStatus
-            bool_byte_18 = chunk[18] if len(chunk) > 18 else 0
-            leak_valve_status = bool(bool_byte_18 & 0x01)  # bit 0
+            # +12.0: leakValveStatus (v3 layout — moved from +18 in v2.x)
+            bool_byte_12 = chunk[12] if len(chunk) > 12 else 0
+            leak_valve_status = bool(bool_byte_12 & 0x01)  # bit 0
             cabins.append(CabinFrame(
                 cabin_index=i,
                 rt_ai=struct.unpack_from(">h", chunk, 0)[0],

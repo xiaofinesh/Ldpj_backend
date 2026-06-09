@@ -79,6 +79,66 @@ class TestComputeQForRow:
         q, dp = compute_q_for_row(bad_row, profile, cabins_cfg)
         assert q is None and dp is None
 
+    def test_initial_slope_window_isolates_initial_decay(self, profile, cabins_cfg):
+        """README §5: first-N window captures the steep initial decay slope.
+
+        Curve = steep linear drop for 30 samples, then flat. The full-window
+        fit averages in the flat tail (shallower |dp/dt|); the first-30 window
+        recovers the true initial slope (steeper |dp/dt|).
+        """
+        n = 60
+        angles = [90.0 + 3.0 * i for i in range(n)]   # all inside hold [90,290)
+        pressures = [600.0 - 2.0 * i if i < 30 else 600.0 - 2.0 * 29 for i in range(n)]
+        row = pd.Series({
+            "pressure_data": json.dumps(pressures),
+            "angle_data": json.dumps(angles),
+            "cavity_id": 1,
+        })
+        _, dp_full = compute_q_for_row(row, profile, cabins_cfg)
+        _, dp_init = compute_q_for_row(row, profile, cabins_cfg,
+                                       initial_slope_points=30)
+        # Initial window sees the true -2 mbar/sample → -2000 Pa/s (interval 0.1s)
+        assert dp_init == pytest.approx(-2000.0, rel=1e-6)
+        # Full window is diluted by the flat tail → shallower magnitude
+        assert abs(dp_init) > abs(dp_full)
+
+    def test_per_row_interval_resolution(self, profile, cabins_cfg):
+        """interval_s is resolved per row from cycle_profile_id, not the active
+        profile — a row collected at a finer interval gets a 2× larger dp/dt."""
+        n = 40
+        angles = [90.0 + 4.0 * i for i in range(n)]   # inside hold [90,290)
+        pressures = [600.0 - 1.0 * i for i in range(n)]
+        base = {"pressure_data": json.dumps(pressures),
+                "angle_data": json.dumps(angles), "cavity_id": 1}
+        interval_by_profile = {"bph_13000": 0.1, "bph_fast": 0.05}
+
+        row_slow = pd.Series({**base, "cycle_profile_id": "bph_13000"})
+        row_fast = pd.Series({**base, "cycle_profile_id": "bph_fast"})
+        _, dp_slow = compute_q_for_row(row_slow, profile, cabins_cfg,
+                                       interval_by_profile=interval_by_profile)
+        _, dp_fast = compute_q_for_row(row_fast, profile, cabins_cfg,
+                                       interval_by_profile=interval_by_profile)
+        # Same curve, half the interval → twice the dp/dt
+        assert dp_fast == pytest.approx(2.0 * dp_slow, rel=1e-9)
+
+    def test_missing_profile_id_falls_back_loudly(self, profile, cabins_cfg, caplog):
+        """A row whose cycle_profile_id is absent from the map falls back to the
+        active interval AND warns once."""
+        import logging
+        n = 20
+        row = pd.Series({
+            "pressure_data": json.dumps([600.0 - i for i in range(n)]),
+            "angle_data": json.dumps([90.0 + 4.0 * i for i in range(n)]),
+            "cavity_id": 1, "cycle_profile_id": "deleted_profile",
+        })
+        warned: set = set()
+        with caplog.at_level(logging.WARNING):
+            compute_q_for_row(row, profile, cabins_cfg,
+                              interval_by_profile={"bph_13000": 0.1},
+                              warned_ids=warned)
+        assert "deleted_profile" in warned
+        assert any("deleted_profile" in r.message for r in caplog.records)
+
     def test_q_scales_linearly_with_v_cabin(self, profile, cabins_cfg):
         """Doubling V_cabin must double Q for the same curve."""
         df = generate(n_cabins=1, n_rounds=1, seed=99)

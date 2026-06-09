@@ -149,22 +149,27 @@ python scripts/calibrate_v_cabin.py \
 
 ---
 
-## 机械时序 / 6 段切割
+## 机械时序 / 5 段切割
 
 ```
 转盘: 25 工位, 一圈 ~6900ms (BPH 13000)
+边界 [0/73/93/283/300/360]° — v2.6.2-cal20260605 终标定
 
   ┌─ angle=0° (trigger): 整圈采集开始, 70 点 @ 100ms ─┐
-  │  baseline_pre [0°,57.6°)    瓶进、压紧、常压基线    │
-  │  evac         [57.6°,93°)   抽真空段                │
-  │  stable       [93°,115°)    稳定段                  │
-  │  hold         [115°,273.6°) ★保压检测段 (主信号)    │
-  │  release      [273.6°,302.4°) 破真空段              │
-  │  baseline_post[302.4°,360°) 瓶出、常压归零          │
+  │  baseline_pre [0°,73°)     瓶进、压紧、常压基线     │
+  │  evac         [73°,93°)    抽真空段                 │
+  │  hold         [93°,283°)   ★保压检测段 (M1 主信号)  │
+  │  release      [283°,300°)  破真空段                 │
+  │  baseline_post[300°,360°)  瓶出、常压归零           │
   └─ 7 秒后整圈采完 (角度归零兜底) ────────────────────┘
 ```
 
-`hold` 段是 M1 计算 `trend_slope` 的主段。其它段贡献给 M2 的 43 维特征。
+`hold` 段是 M1 计算 `trend_slope` 的主段。其它段贡献给 M2 的 36 维特征。
+
+> ★ 保压窗 **[93°,283°)** 必须与生产 `m1_coefficients.json` 严格对应:
+> 破真空起点中位 287.5°(p05 282.5°)早于原 [90,290) 的末点 290°,旧配置会把
+> 陡降点纳入斜率,使 M1 R² 从 0.9995 跌到 ~0.79。改分段而不重训系数表
+> (或反之)即触发风险 R01「系数表失配」。v2.6 的 `stable` 段已并入 `hold`。
 
 ---
 
@@ -195,9 +200,9 @@ Cabin[0] 保留. 系统读取 Cabin[1]~Cabin[25].
 
 ---
 
-## 特征工程 (43 维)
+## 特征工程 (36 维)
 
-70 点压力曲线按角度切成 6 段，每段 7 个统计量 + cavity_id：
+70 点压力曲线按角度切成 5 段，每段 7 个统计量 + cavity_id：
 
 ```
 [
@@ -205,15 +210,17 @@ Cabin[0] 保留. 系统读取 Cabin[1]~Cabin[25].
   baseline_pre_average, baseline_pre_variance,
   baseline_pre_trend_slope, baseline_pre_count,
 
-  evac_*  (7),  stable_*  (7),
+  evac_*  (7),
   hold_*  (7),  ← M1 读 hold_trend_slope
   release_* (7), baseline_post_* (7),
 
-  cavity_id     ← 第 43 维
+  cavity_id     ← 第 36 维
 ]
 ```
 
-`count` 是该段实际包含的点数（短段时仍可识别）。
+`count` 是该段实际包含的点数（短段时仍可识别）。v2.6 的 `stable` 段
+（93°–115°）经 131808/112936 数据分析为伪段（斜率从抽真空到破真空连续），
+已并入 `hold`，特征维度由 43 降为 36。规范见 `core/feature_spec.py`。
 
 ---
 
@@ -245,6 +252,8 @@ PLC --(10ms)--> polling_engine --> CycleFSM --(100ms × 70 点)--> CycleData
 | F010 | WARNING | M1/M2 漏率估计相对差 > 阈值 (默认 20%) |
 | F011 | WARNING | M1 表里没有该舱标定（fallback 到均值） |
 | F012 | INFO | Q_est 低于系统分辨率 A_resolution（不参与判决） |
+| F013 | WARNING | 运行点采样间隔与标定不一致：M1 已按物理重缩放，M2 交叉校验禁用 |
+| F014 | WARNING | 运行点真空度与标定不一致：M2 绝压特征失准（M1 不受影响） |
 
 完整故障码定义见 `health/fault_codes.py`（F001-F009 来自 v2.5）。
 
@@ -255,12 +264,27 @@ PLC --(10ms)--> polling_engine --> CycleFSM --(100ms × 70 点)--> CycleData
 | 文件 | 内容 |
 |---|---|
 | `configs/plc.yaml` | PLC 连接 + DB9 映射 + 轮询参数 |
-| `configs/runtime.yaml` | `cycle_profiles` (周期配方) + `model_inference` + 数据库 |
-| `configs/models.yaml` | M1 / M2 / 旧 XGB 路径 |
-| `configs/cabins.yaml` | 25 舱 V_cabin 标定值 |
-| `configs/products.yaml` | 产品判废参数 (Q_threshold, flow_regime, l_ref_mm) |
+| `configs/runtime.yaml` | `cycle_profiles` (保压窗 [93,283)) + `model_inference` (a_resolution / a_estimate=A / a_det) + 数据库 |
+| `configs/models.yaml` | M1 / M2 工件路径 (current/) |
+| `configs/cabins.yaml` | 25 舱 V_cabin 标定值 (cal20260605, 含舱24=225mL) |
+| `configs/products.yaml` | 产品判废参数 (Q_threshold, flow_regime, l_ref_mm); 启动强制校验 `Q_threshold > A`, 建议 `≥ A_det` |
 | `configs/health.yaml` | 健康检查参数 |
 | `configs/ipc.yaml` | API server + 告警推送 |
+
+> **已部署模型**: `models/artifacts/current/` 为 `v2.6.2-cal20260605`
+> (茅台 500mL 标定): M1 25 舱全通过 (β∈[−0.2352,−0.2092]), M2 top-20 特征
+> log10(Q) 回归 (test R²=0.9966)。换瓶型须重标并经 `deploy_model.sh` 重新部署。
+
+### 工况契约 (operating_point, v2.6.3) — 为调整产量/真空预留的空间
+
+模型对**两个工况维度**敏感，系统用机器可校验的"工况指纹"在启动时守护：
+
+| 维度 | 落点 | 变更时的行为 |
+|---|---|---|
+| **产量/转速**（时基: `bph`/`cycle_total_ms`/`interval_s`/`points`/段边界） | `runtime.yaml::cycle_profiles.<id>` | 物理上 `β ∝ 1/interval_s`。若改动**不改变保压窗内采样数** (仅等密度的间隔缩放) → M1 的 β **确定性重缩放** (无需重训) + M2 禁用 + **F013**；若改变了采样数 (转速变即 `cycle_total_ms` 变、采样点变等) → **拒绝启动**，须按新工况重标定。 |
+| **抽真空时间/最大真空度**（`p_chamber_pa`/`p_atm_pa`） | `runtime.yaml::cycle_profiles.<id>.vacuum` | M1 仅用斜率、对真空不变；不一致 → **F014** 告警 (M2 绝压特征失准)。`q_d_conversion` 已就绪 `p_chamber` 入参，接 HMI 孔径显示时由调用方传入。 |
+
+工件 (`m1_coefficients.json` / `m2_metadata.json`) 内嵌 `operating_point` 指纹；`main.py` 启动门比对运行工况与工件标定工况，并把 `k_ts≈1014` 物理自洽性提升为运行期不变量。**调整产量/真空的标准流程**：在 `runtime.yaml` 改对应 profile → 用新工况数据重标定 → `scripts/deploy_model.sh`（会强制校验工况兼容性）部署。此机制专为关闭"M1/M2 同向漂移、F010 无法察觉"的静默失配 (风险 R01)。
 
 ---
 
@@ -307,7 +331,7 @@ Ldpj_backend/
 │   └── calibrate_v_cabin.py      # V_cabin 标定 CLI
 ├── deploy/
 │   └── offline_install.sh        # 离线部署
-└── tests/                        # 单元 + 集成测试 (212 项)
+└── tests/                        # 单元 + 集成测试 (261 项)
 ```
 
 ---
@@ -347,7 +371,7 @@ Header: `X-API-Key: <your-key>`
 
 ```bash
 pytest tests/ -v
-# 212 passed
+# 261 passed
 ```
 
 涵盖：FSM 状态转换 / 特征计算 / 数据库 schema 与压缩 round-trip /

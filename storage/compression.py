@@ -20,10 +20,13 @@ Decompression overhead: < 1 ms per 70-point curve.
 
 from __future__ import annotations
 
+import logging
 import zlib
 from typing import List, Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # zlib level: 1 (fastest) to 9 (best). For float32 with high-entropy
@@ -53,9 +56,16 @@ def decompress_float_array(blob: Optional[bytes]) -> Optional[List[float]]:
     """
     if not blob:
         return None
-    raw = zlib.decompress(blob)
-    arr = np.frombuffer(raw, dtype=np.float32)
-    return arr.tolist()
+    # A corrupt/truncated BLOB must not abort a whole CSV export mid-file or
+    # 500 the /records/{id} endpoint — degrade to None so callers skip the row.
+    try:
+        raw = zlib.decompress(blob)
+        arr = np.frombuffer(raw, dtype=np.float32)
+        return arr.tolist()
+    except Exception as exc:
+        logger.warning("decompress_float_array: corrupt BLOB (%d bytes): %s",
+                       len(blob), exc)
+        return None
 
 
 def estimate_compression_ratio(values: List[float]) -> float:

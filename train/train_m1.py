@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from configs.loaders import load_runtime_config
 from core.cycle_profile import load_active_cycle_profile
+from core.operating_point import fingerprint_from_profile
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -179,6 +180,9 @@ def main(argv=None) -> int:
         "feature": feature_name,
         "target": "Q (Pa·m³/s)",
         "primary_section": profile.primary_section,
+        # v2.6.3: machine-checkable operating-point fingerprint (time-base +
+        # vacuum). The startup gate validates this against the active profile.
+        "operating_point": fingerprint_from_profile(profile),
         "n_cabins_calibrated": len(cabin_coefs),
         "n_cabins_failed_acceptance": len(failed),
         "acceptance": {"min_r2": args.min_r2},

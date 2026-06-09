@@ -1,7 +1,7 @@
 """FastAPI-based HTTP API server for external IPC data access."""
 
 from __future__ import annotations
-import logging, threading
+import logging, secrets, threading
 from typing import Any, Dict, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
@@ -16,7 +16,17 @@ _refs: Dict[str, Any] = {"db_logger": None, "health_checker": None, "polling_eng
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def _verify_key(key: Optional[str] = Security(api_key_header)) -> str:
-    if key != _refs["api_key"]: raise HTTPException(status_code=403, detail="Invalid API key")
+    # Fail closed: reject when no key is presented OR no key is configured
+    # (a null/empty api_key must NOT become an auth bypass — `None == None`
+    # would otherwise let unauthenticated callers through). Constant-time
+    # compare avoids a timing side-channel on the key.
+    expected = _refs.get("api_key")
+    # Compare as UTF-8 bytes: secrets.compare_digest rejects non-ASCII str
+    # (raises TypeError → HTTP 500 = total auth wedge) if the key has e.g.
+    # Chinese characters. bytes compare is constant-time and charset-safe.
+    if not key or not expected or not secrets.compare_digest(
+            str(key).encode("utf-8"), str(expected).encode("utf-8")):
+        raise HTTPException(status_code=403, detail="Invalid API key")
     return key
 
 

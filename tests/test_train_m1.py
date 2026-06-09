@@ -91,6 +91,16 @@ class TestCli:
         assert data["feature"] == "hold_trend_slope"
         assert "n_cabins_calibrated" in data
         assert data["n_cabins_calibrated"] == 5
+
+        # v2.6.3: trainer must stamp the operating_point fingerprint from the
+        # active profile, and it must load back into M1.
+        assert "operating_point" in data
+        op = data["operating_point"]
+        assert op["profile_id"] == "bph_13000"
+        assert op["interval_s"] == 0.1
+        assert op["hold_window_deg"] == [93.0, 283.0]
+        assert m1.operating_point is not None
+        assert m1.operating_point.profile_id == "bph_13000"
         for cid in [1, 2, 3, 4, 5]:
             entry = data["cabins"][str(cid)]
             assert "beta" in entry and "alpha" in entry

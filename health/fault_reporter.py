@@ -1,7 +1,7 @@
 """Fault reporter – centralized fault tracking and notification."""
 
 from __future__ import annotations
-import enum, logging, time
+import enum, logging, threading, time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 from health.fault_codes import FAULT_CODES
@@ -34,6 +34,10 @@ class FaultEvent:
 
 class FaultReporter:
     def __init__(self):
+        # _lock guards _active_faults against concurrent raise/resolve (health
+        # thread, proc-loop, result-sender callback) vs iteration (summary,
+        # has_critical) — previously a "dict changed size during iteration".
+        self._lock = threading.Lock()
         self._active_faults: Dict[str, FaultEvent] = {}
         self._callbacks: List[Callable] = []
         self._fault_defs: Dict[str, FaultDef] = {}
@@ -46,30 +50,36 @@ class FaultReporter:
         self._callbacks.append(cb)
 
     def raise_fault(self, code: str, message: str = "") -> None:
-        if code in self._active_faults: return
         fault_def = self._fault_defs.get(code)
         if not fault_def:
             fault_def = FaultDef(code=code, description="Unknown", level=FaultLevel.ERROR, plc_value=99)
         event = FaultEvent(fault=fault_def, message=message or fault_def.description, timestamp=time.time())
-        self._active_faults[code] = event
+        with self._lock:
+            if code in self._active_faults:
+                return  # already active (dedup) — no re-log, no re-callback
+            self._active_faults[code] = event
         logger.log(logging.ERROR if fault_def.level in (FaultLevel.ERROR, FaultLevel.CRITICAL) else logging.WARNING,
                     "FAULT [%s] %s: %s", code, fault_def.level.value, event.message)
-        for cb in self._callbacks:
+        # Callbacks run OUTSIDE the lock (a callback may itself raise_fault).
+        for cb in list(self._callbacks):
             try: cb(event)
             except Exception: pass
 
     def resolve_fault(self, code: str) -> None:
-        if code in self._active_faults:
-            self._active_faults[code].resolved = True
-            del self._active_faults[code]
+        with self._lock:
+            ev = self._active_faults.pop(code, None)
+        if ev is not None:
             logger.info("FAULT RESOLVED [%s]", code)
 
     @property
-    def active_faults(self) -> Dict[str, FaultEvent]: return dict(self._active_faults)
+    def active_faults(self) -> Dict[str, FaultEvent]:
+        with self._lock:
+            return dict(self._active_faults)
 
     @property
     def has_critical(self) -> bool:
-        return any(e.fault.level == FaultLevel.CRITICAL for e in self._active_faults.values())
+        with self._lock:
+            return any(e.fault.level == FaultLevel.CRITICAL for e in self._active_faults.values())
 
     # Severity ranking for fault levels (higher = more severe)
     _SEVERITY = {FaultLevel.INFO: 0, FaultLevel.WARNING: 1,
@@ -80,13 +90,17 @@ class FaultReporter:
 
         Lower numeric plc_value does NOT mean lower severity — codes are arbitrary IDs.
         """
-        if not self._active_faults: return 0
-        most_severe = max(self._active_faults.values(),
-                          key=lambda e: self._SEVERITY.get(e.fault.level, 0))
-        return most_severe.fault.plc_value
+        with self._lock:
+            if not self._active_faults: return 0
+            most_severe = max(self._active_faults.values(),
+                              key=lambda e: self._SEVERITY.get(e.fault.level, 0))
+            return most_severe.fault.plc_value
 
     def summary(self) -> Dict[str, Any]:
-        return {"active_count": len(self._active_faults), "has_critical": self.has_critical,
+        with self._lock:
+            items = list(self._active_faults.values())
+        has_crit = any(e.fault.level == FaultLevel.CRITICAL for e in items)
+        return {"active_count": len(items), "has_critical": has_crit,
                 "faults": [{"code": e.fault.code, "level": e.fault.level.value,
                             "message": e.message, "since": e.timestamp}
-                           for e in self._active_faults.values()]}
+                           for e in items]}

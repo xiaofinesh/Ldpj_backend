@@ -13,6 +13,7 @@ from core.features import compute_features_v26
 from core.quality_flags import (
     QF_CD_CLAMPED,
     QF_DEGENERATE_INPUT,
+    QF_NONFINITE,
     QF_SHORT_BASELINE_POST,
     QF_SHORT_BASELINE_PRE,
     QF_SHORT_EVAC,
@@ -20,6 +21,25 @@ from core.quality_flags import (
     QF_SHORT_RELEASE,
     compute_quality_flags,
 )
+
+
+def test_nonfinite_feature_sets_flag():
+    """A NaN/inf feature value must set QF_NONFINITE (the most dangerous
+    silent corruption — a NaN Q would read as OK against any threshold)."""
+    feats = {f"{s}_count": 10.0 for s in
+             ("baseline_pre", "evac", "hold", "release", "baseline_post")}
+    feats["hold_trend_slope"] = float("nan")
+    assert compute_quality_flags(feats) & QF_NONFINITE
+
+    feats["hold_trend_slope"] = float("inf")
+    assert compute_quality_flags(feats) & QF_NONFINITE
+
+
+def test_finite_features_no_nonfinite_flag():
+    feats = {f"{s}_count": 10.0 for s in
+             ("baseline_pre", "evac", "hold", "release", "baseline_post")}
+    feats["hold_trend_slope"] = -0.14
+    assert not (compute_quality_flags(feats) & QF_NONFINITE)
 
 
 @pytest.fixture

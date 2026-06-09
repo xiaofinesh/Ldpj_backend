@@ -93,6 +93,12 @@ class CabinFSM:
         self._state = CycleState.IDLE
         self._data = CycleData()
         self._last_angle: Optional[float] = None
+        # If sampling stalls (e.g. polling stopped for a PLC reconnect) for
+        # longer than this, the backlog would otherwise be "burst" onto
+        # consecutive frames — collapsing the 70 samples into a short arc and
+        # destroying full-cycle coverage, yet still completing to a verdict.
+        # Treat such a gap as a FAULT (discard the cycle) rather than judge it.
+        self._max_sample_gap_s = max(0.5, 5.0 * profile.collection_interval_s)
         # Absolute timestamp at which the *next* sample should be taken.
         # Updated by += interval (NOT = ts + interval), so per-frame jitter
         # does NOT accumulate across the 70-point window. This is the
@@ -172,9 +178,12 @@ class CabinFSM:
             if self._last_angle < trigger <= angle:
                 crossed = True
         else:
-            # Trigger at 0°: detect angle wrapping past 360° -> 0°
+            # Trigger at 0°: detect angle wrapping past 360° -> 0°. The narrow
+            # [330,360)->(0,30] window can be jumped over after a polling gap;
+            # a large backward step (>180°) also means we crossed 0°.
             if (self._last_angle >= self.WRAP_FROM_THRESHOLD
-                    and angle <= self.WRAP_BACK_THRESHOLD):
+                    and angle <= self.WRAP_BACK_THRESHOLD) \
+                    or (self._last_angle - angle > 180.0):
                 crossed = True
 
         if not crossed:
@@ -201,6 +210,20 @@ class CabinFSM:
         so per-frame jitter does NOT accumulate across the 70-point window.
         """
         elapsed = ts - self._data.start_time
+
+        # Acquisition-gap guard: if we're far past the next sample target, the
+        # sample stream stalled (e.g. PLC reconnect). Bursting the backlog onto
+        # consecutive frames would corrupt the cycle's angle coverage, so fault
+        # the cycle instead of producing a misleading verdict.
+        if ts - self._next_target_ts > self._max_sample_gap_s:
+            self._data.end_angle = angle
+            self._state = CycleState.FAULT
+            logger.warning(
+                "Cabin %d: COLLECTING -> FAULT (sampling gap %.1fs, %d/%d points)",
+                self.cabin_id, ts - self._next_target_ts,
+                len(self._data.pressures), self._profile.collection_points,
+            )
+            return
 
         if ts >= self._next_target_ts:
             self._append(frame)

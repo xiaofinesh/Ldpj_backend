@@ -1,8 +1,13 @@
-"""Result sender — writes inference results and fault codes back to PLC.
+"""Result sender — writes inference results back to PLC.
 
-Each cabin's result is written into its own CabinParam UDT within DB9:
-  - leakTestResult_AI  (Bool at cabin_base + 12, bit 0): AI leak detection result
-  - cabinHealthStatus  (REAL at cabin_base + 14):        v2.5 probability / v2.6 Q_est
+v3 (DB_Global 26-byte CabinParam): the edge writes back TWO REALs into each
+cabin's CabinParam UDT within DB9, and the PLC forms its own verdict from them:
+  - leakRate          (REAL at cabin_base + 14): edge leak rate Q (Pa·m³/s)
+  - leakHoleDiameter  (REAL at cabin_base + 18): edge thin-wall pinhole d (µm)
+The edge does NOT write the verdict bit (leakTestResult_edge, +12.2 — PLC writes
+that from Q+d) nor cabinHealthStatus (+22, health — not sent for now).
+
+(Legacy note: v2.x wrote leakTestResult_AI bit + cabinHealthStatus=Q at +12/+14.)
 
 v2.6 architecture: optional async write-back
 --------------------------------------------
@@ -64,8 +69,11 @@ class ResultSender:
         self._active_end = cabin_cfg.get("active_end", 25)
 
         wb = plc_cfg.get("write_back", {})
-        self._result_ai_offset = wb.get("leak_result_ai_offset", 12)
-        self._health_offset = wb.get("cabin_health_offset", 14)
+        # v3 (DB_Global 26B): edge writes back TWO REALs — leakRate (Q) and
+        # leakHoleDiameter (d). The PLC forms its own verdict (leakTestResult_edge)
+        # from them; health status (cabinHealthStatus) is NOT written by the edge.
+        self._leak_rate_offset = wb.get("leak_rate_offset", 14)
+        self._leak_hole_diameter_offset = wb.get("leak_hole_diameter_offset", 18)
 
         # Fault-code byte sits right after the cabin array unless explicitly
         # placed elsewhere via plc.yaml::fault_write.byte_offset. Deriving
@@ -77,7 +85,7 @@ class ResultSender:
 
         # Async writeback state
         self._async_enabled = False
-        self._pending: Dict[int, Tuple[int, float]] = {}     # cabin_id -> (label, q_est)
+        self._pending: Dict[int, Tuple[float, float]] = {}   # cabin_id -> (q_est, d_est)
         self._pending_lock = threading.Lock()
         self._wakeup = threading.Event()
         self._stop_event = threading.Event()
@@ -130,31 +138,29 @@ class ResultSender:
 
     # ── Public API (sync + async dual-mode) ──────────────────────────
 
-    def write_result(self, cabin_id: int, label: int, q_est: float) -> None:
-        """Write the inference result to PLC.
+    def write_result(self, cabin_id: int, q_est: float, d_est: float) -> None:
+        """Write the dual result to PLC: leak rate Q + thin-wall diameter d.
 
-        Sync mode (default): performs the RMW immediately, blocks until done.
-        Async mode (``enable_async()`` was called): enqueues the result and
-        returns in O(1). The writer thread serialises the actual snap7 IO.
+        v3 (DB_Global 26B): the edge writes leakRate (+14, REAL = Q_est) and
+        leakHoleDiameter (+18, REAL = d_est, µm). The PLC forms its own
+        pass/fail (leakTestResult_edge) from these two values — the edge no
+        longer writes a verdict bit, and health status is NOT written.
 
-        v2.6 semantic note (cabinHealthStatus REAL field):
-            v2.5: probability ∈ [0, 1]
-            v2.6: Q_est in Pa·m³/s
-        Bytes-on-wire format unchanged; HMI display logic must match the
-        backend version. See module docstring for details.
+        Sync mode (default): writes immediately. Async mode: enqueues and the
+        writer thread serialises the snap7 IO (per-cabin coalesce keeps freshest).
         """
         if cabin_id < self._active_start or cabin_id > self._active_end:
             logger.debug("Cabin %d: outside active range [%d..%d], skip",
                          cabin_id, self._active_start, self._active_end)
             return
-        if label not in (0, 1):
-            logger.debug("Cabin %d: label=%d (unknown), skip", cabin_id, label)
-            return
 
-        if self._async_enabled:
-            self._enqueue(cabin_id, label, q_est)
+        # Once shutdown has begun, the writer thread is draining its final flush
+        # and won't pick up new enqueues — route late results synchronously so
+        # they aren't silently orphaned in _pending.
+        if self._async_enabled and not self._stop_event.is_set():
+            self._enqueue(cabin_id, q_est, d_est)
         else:
-            self._write_result_sync(cabin_id, label, q_est)
+            self._write_result_sync(cabin_id, q_est, d_est)
 
     def write_fault_code(self, plc_value: int) -> None:
         """Write a fault code integer to PLC for HMI display.
@@ -177,17 +183,17 @@ class ResultSender:
     def _cabin_base(self, cabin_id: int) -> int:
         return self._start_offset + cabin_id * self._cabin_size
 
-    def _enqueue(self, cabin_id: int, label: int, q_est: float) -> None:
-        """Add (or replace) a pending writeback for ``cabin_id`` and wake the writer."""
+    def _enqueue(self, cabin_id: int, q_est: float, d_est: float) -> None:
+        """Add (or replace) a pending (Q, d) writeback for ``cabin_id``."""
         with self._pending_lock:
             replaced = cabin_id in self._pending
-            self._pending[cabin_id] = (label, q_est)
+            self._pending[cabin_id] = (q_est, d_est)
         self._stats["queued"] += 1
         if replaced:
             self._stats["coalesced"] += 1
         self._wakeup.set()
 
-    def _drain_pending_snapshot(self) -> Dict[int, Tuple[int, float]]:
+    def _drain_pending_snapshot(self) -> Dict[int, Tuple[float, float]]:
         """Atomically take the pending dict and clear it."""
         with self._pending_lock:
             snap = self._pending
@@ -219,9 +225,9 @@ class ResultSender:
             return
         # Iterate in deterministic order so logs are readable and tests stable.
         for cabin_id in sorted(snap.keys()):
-            label, q_est = snap[cabin_id]
+            q_est, d_est = snap[cabin_id]
             try:
-                self._write_result_sync(cabin_id, label, q_est)
+                self._write_result_sync(cabin_id, q_est, d_est)
                 self._stats["written"] += 1
             except PLCWriteError as exc:
                 self._stats["failed"] += 1
@@ -231,35 +237,33 @@ class ResultSender:
                     cabin_id, exc,
                 )
 
-    def _write_result_sync(self, cabin_id: int, label: int, q_est: float) -> None:
-        """Read-modify-write the cabin's 8-byte writeback block.
+    def _write_result_sync(self, cabin_id: int, q_est: float, d_est: float) -> None:
+        """Write the two edge-owned REALs: leakRate (Q) and leakHoleDiameter (d).
 
-        See class docstring for the byte layout. This is the same logic
-        v2.5 used; the only v2.6 change is the semantic of the third arg.
+        These fields are edge-output-only (no PLC-written bits inside them), so
+        no read-modify-write is needed — we write them directly. When the two
+        offsets are contiguous (the standard +14/+18 layout) it's a single
+        8-byte write; otherwise two 4-byte writes.
         """
         base = self._cabin_base(cabin_id)
-        write_addr = base + self._result_ai_offset
-
+        rate_addr = base + self._leak_rate_offset
         with self._write_lock:
             conn = self._polling_engine.connection
             try:
-                current = conn.db_read(self._db_number, write_addr, 8)
-                buf = bytearray(current)
-
-                # Byte 0 (+12): set/clear bit 0 (leakTestResult_AI)
-                if label == 0:
-                    buf[0] = buf[0] | 0x01
+                if self._leak_hole_diameter_offset == self._leak_rate_offset + 4:
+                    buf = bytearray(8)
+                    struct.pack_into(">f", buf, 0, float(q_est))   # leakRate
+                    struct.pack_into(">f", buf, 4, float(d_est))   # leakHoleDiameter
+                    conn.db_write(self._db_number, rate_addr, buf)
                 else:
-                    buf[0] = buf[0] & ~0x01
-
-                # Bytes 2..5 (+14..+17): cabinHealthStatus (REAL)
-                struct.pack_into(">f", buf, 2, q_est)
-
-                conn.db_write(self._db_number, write_addr, buf)
+                    conn.db_write(self._db_number, rate_addr,
+                                  bytearray(struct.pack(">f", float(q_est))))
+                    conn.db_write(self._db_number, base + self._leak_hole_diameter_offset,
+                                  bytearray(struct.pack(">f", float(d_est))))
 
                 logger.debug(
-                    "Cabin %d: write-back OK (addr=%d, label=%d, q=%.4e)",
-                    cabin_id, write_addr, label, q_est,
+                    "Cabin %d: write-back OK (leakRate=%.4e, leakHoleDiameter=%.1f um)",
+                    cabin_id, q_est, d_est,
                 )
             except Exception as exc:
                 logger.error("Cabin %d: PLC write-back failed: %s", cabin_id, exc)

@@ -44,6 +44,10 @@ class CycleProfile:
     collection_timeout_s: float
     primary_section: str = "hold"
     description: str = ""
+    # v2.6.3 vacuum axis (secondary / recorded-but-inert; see core.operating_point).
+    # Defaults keep every existing CycleProfile(...) construction valid.
+    p_chamber_pa: float = 35000.0
+    p_atm_pa: float = 101325.0
 
     def validate(self) -> None:
         """Sanity-check the profile. Raises ValueError on invalid config."""
@@ -107,12 +111,18 @@ class CycleProfile:
 
     @classmethod
     def from_dict(cls, profile_id: str, data: Dict[str, Any]) -> "CycleProfile":
-        """Build CycleProfile from a yaml-loaded dict."""
+        """Build CycleProfile from a yaml-loaded dict.
+
+        The optional ``vacuum:`` block ({p_chamber_pa, p_atm_pa}) is parsed for
+        the v2.6.3 operating-point contract; absence defaults to 35000/101325
+        so pre-v2.6.3 profiles load unchanged.
+        """
         sections = {
             name: (float(bounds[0]), float(bounds[1]))
             for name, bounds in data.get("sections", {}).items()
         }
         collection = data.get("collection", {})
+        vacuum = data.get("vacuum", {}) or {}
         return cls(
             profile_id=profile_id,
             bph=int(data.get("bph", 0)),
@@ -124,6 +134,32 @@ class CycleProfile:
             collection_timeout_s=float(collection.get("timeout_s", 10.0)),
             primary_section=data.get("primary_section", "hold"),
             description=data.get("description", ""),
+            p_chamber_pa=float(vacuum.get("p_chamber_pa", 35000.0)),
+            p_atm_pa=float(vacuum.get("p_atm_pa", 101325.0)),
+        )
+
+    def operating_point(self) -> "Any":
+        """Project this profile into an OperatingPoint (v2.6.3).
+
+        The slope-bearing window is the primary section's bounds (``hold``).
+        Returned object is the machine-checkable fingerprint source used by the
+        startup gate and the training artifact writers.
+        """
+        from core.operating_point import OperatingPoint
+
+        hold = self.sections.get(self.primary_section) or self.sections.get("hold") or (0.0, 0.0)
+        return OperatingPoint(
+            profile_id=self.profile_id,
+            bph=self.bph,
+            cycle_total_ms=self.cycle_total_ms,
+            interval_s=self.collection_interval_s,
+            points=self.collection_points,
+            trigger_angle=self.trigger_angle,
+            hold_window_deg=(float(hold[0]), float(hold[1])),
+            sections=dict(self.sections),
+            primary_section=self.primary_section,
+            p_chamber_pa=self.p_chamber_pa,
+            p_atm_pa=self.p_atm_pa,
         )
 
 

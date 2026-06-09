@@ -1,6 +1,8 @@
 # PLC S7 连接与数据块配置
 # 基于 DB_Global [DB9] 的 Cabin Array 结构
-# v2: CabinParam UDT 20字节，含 AI 结果写回字段
+# v3 (DB_Global 2024 更新): CabinParam UDT = 26 字节，回传字段独立化:
+#   边缘(AI)只回传 leakRate(Q) + leakHoleDiameter(d)，由 PLC 自行用这两个值判废
+#   (leakTestResult_edge 由 PLC 写)。健康度 cabinHealthStatus 暂不回传。
 # 注意: Cabin[0] 为预留舱, 实际使用 Cabin[1]~Cabin[25], 共 25 个舱
 
 connection:
@@ -16,21 +18,23 @@ polling:
 
 # Cabin 数组定义 (对应 DB9 中的 Array[0..25] of "CabinParam")
 #
-# CabinParam UDT 结构 (20 字节):
+# CabinParam UDT 结构 (26 字节):
 #   偏移   字段                  类型      说明
 #   +0     RT_AI                INT (2B)  负压传感器实时模拟量通道值
 #   +2     RT_Pressure          REAL(4B)  负压传感器实时压力值
 #   +6     RT_Position          INT (2B)  实时位号
 #   +8     RT_Angle             REAL(4B)  实时角度值
-#   +12.0  leakTestResult_AI    Bool      AI 渗漏检测结果 (写回)
+#   +12.0  leakValveStatus      Bool      验证阀状态 (输入, 标注用)
 #   +12.1  leakTestResult_PLC   Bool      PLC 渗漏检测结果
-#   +14    cabinHealthStatus    REAL(4B)  舱室健康度 (写回)
-#   +18.0  leakValveStatus      Bool      验证阀状态
+#   +12.2  leakTestResult_edge  Bool      PLC 用边缘 Q+d 判断的结果 (PLC 写)
+#   +14    leakRate             REAL(4B)  边缘(AI)漏率 Q (写回) ★
+#   +18    leakHoleDiameter     REAL(4B)  边缘(AI)薄壁漏孔直径 d μm (写回) ★
+#   +22    cabinHealthStatus    REAL(4B)  舱室健康度 (暂不回传)
 cabin_array:
   db_number: 9
   start_offset: 0
   cabin_count: 26             # Array[0..25], PLC 定义 26 个 (Cabin[0] 预留)
-  cabin_size_bytes: 20        # 每个 CabinParam UDT 占 20 字节
+  cabin_size_bytes: 26        # 每个 CabinParam UDT 占 26 字节 (v3)
   active_start: 1             # 实际使用的起始 cabin index (跳过 Cabin[0])
   active_end: 25              # 实际使用的结束 cabin index (含)
   fields:
@@ -50,33 +54,46 @@ cabin_array:
       type: REAL
       offset: 8
       description: "实时角度值"
-    - name: leak_test_result_ai
+    - name: leak_valve_status
       type: BOOL
       offset: 12
       bit: 0
-      description: "AI 渗漏检测结果 (写回)"
+      description: "验证阀状态 (输入, 标注用)"
     - name: leak_test_result_plc
       type: BOOL
       offset: 12
       bit: 1
       description: "PLC 渗漏检测结果"
-    - name: cabin_health_status
+    - name: leak_test_result_edge
+      type: BOOL
+      offset: 12
+      bit: 2
+      description: "PLC 用边缘 Q+d 判断的结果 (PLC 写)"
+    - name: leak_rate
       type: REAL
       offset: 14
-      description: "舱室健康度 (写回)"
-    - name: leak_valve_status
-      type: BOOL
+      description: "边缘(AI)漏率 Q (写回)"
+    - name: leak_hole_diameter
+      type: REAL
       offset: 18
-      bit: 0
-      description: "验证阀状态"
+      description: "边缘(AI)薄壁漏孔直径 d μm (写回)"
+    - name: cabin_health_status
+      type: REAL
+      offset: 22
+      description: "舱室健康度 (暂不回传)"
 
 # 每个 cabin 内的写回字段偏移 (相对于 cabin 起始地址)
+# 边缘只回传 leakRate(Q) + leakHoleDiameter(d), 两者连续 8 字节, 一次写入。
 write_back:
-  leak_result_ai_offset: 12   # leakTestResult_AI, Bool at bit 0
-  cabin_health_offset: 14     # cabinHealthStatus, REAL
+  leak_rate_offset: 14            # leakRate (REAL) = Q_est
+  leak_hole_diameter_offset: 18   # leakHoleDiameter (REAL) = d_est (薄壁 Yoshida)
+  # cabin_health_offset: 22       # cabinHealthStatus —— 暂不回传
 
-# 故障码写入配置 (全局, 在 cabin 数组之后: 26×20=520)
+# 故障码写入配置
+# 注意: 新 DB (CabinParam 26B → Cabin 数组占 0..675) 之后是 MotorArray,
+# 未定义独立故障码字段。write_fault_code 当前未在主流程启用; 如需启用请与
+# 自控工程师确认专用字段偏移, 避免覆盖 cabin/motor 区。
 fault_write:
   db_number: 9
-  byte_offset: 520
+  byte_offset: 676            # cabin 数组 (26×26=676) 之后; 需与 PLC 端确认
   type: INT

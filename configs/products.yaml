@@ -4,36 +4,54 @@
 # d_critical:  等效缺陷孔径, 单位 μm (与 Q_threshold 通过物理公式相互换算)
 # flow_regime: "laminar" 或 "choked", 决定换算公式
 # l_ref_mm:    参考壁厚 mm (laminar 时使用)
+#
+# ★ 分辨率约束 (runtime.yaml::model_inference, 启动时强制校验):
+#   q_threshold 必须 > A=9.0e-3 (估计分辨率), 建议 ≥ A_det=1.56e-2 (检出分辨率)。
+#   低于 A 的阈值会被噪声淹没, 无法可靠判废 —— 启动将报错拒绝。
+#
+# ★ 标定范围: 本系统 (v2.6.2-cal20260605) 仅对【茅台 500mL 灌装态】完成标定。
+#   其它瓶型为占位示例, 换瓶型必须按该瓶型重新标定 V_cabin / β 后才能投产。
 
-default_product_id: "TEST"
+default_product_id: "MAOTAI500"
 
 products:
+  MAOTAI500:
+    name: "茅台酒瓶 500mL (乳白玻璃, 灌装态)"
+    bottle_volume_ml: 500
+    flow_regime: "laminar"
+    l_ref_mm: 0.5
+    # A_det = 1.56e-2 ≈ 36 μm 薄壁圆孔 / 74 μm 毛细口径, POD≥99.87%。
+    # 取检出分辨率为判废阈值(推荐下限); 客户如需更严可上调。
+    q_threshold: 1.56e-2
+    d_critical_um: 36
+    notes: "已标定瓶型 (2026-06-05); 实测 60~120μm 针孔分离度 9σ~20σ"
+
   TEST:
     name: "测试产品 (实验用)"
     bottle_volume_ml: 500
     flow_regime: "laminar"
     l_ref_mm: 0.5
-    q_threshold: 1.0e-3
-    notes: "实验阶段使用, Q_threshold 设较松"
+    q_threshold: 2.0e-2
+    notes: "开发/联调用; 阈值取 > A_det 的宽松值"
 
   P001:
-    name: "500mL 矿泉水"
+    name: "500mL 矿泉水 (示例, 需重标)"
     bottle_volume_ml: 500
     flow_regime: "laminar"
     l_ref_mm: 0.5
-    q_threshold: 2.0e-3
+    q_threshold: 2.0e-2
 
   P002:
-    name: "700mL 53° 白酒"
+    name: "700mL 53° 白酒 (示例, 需重标)"
     bottle_volume_ml: 700
     flow_regime: "laminar"
     l_ref_mm: 0.5
-    q_threshold: 1.5e-3
+    q_threshold: 1.8e-2
 
   P003:
-    name: "330mL 啤酒"
+    name: "330mL 啤酒 (示例, 需重标)"
     bottle_volume_ml: 330
     flow_regime: "choked"
     l_ref_mm: 0.3
-    q_threshold: 5.0e-4
+    q_threshold: 1.56e-2
     notes: "薄壁瓶, 走临界流"

@@ -45,6 +45,9 @@ _MIGRATIONS = [
     # (short sections, clamped C_d, etc.). See core/quality_flags.py for
     # the bit layout.
     "ALTER TABLE test_records ADD COLUMN quality_flags INTEGER DEFAULT 0",
+    # v2.6.4 — second output: thin-wall pinhole equivalent diameter (µm),
+    # Yoshida choked-flow theory value derived from q_est.
+    "ALTER TABLE test_records ADD COLUMN d_est REAL",
 ]
 
 
@@ -98,7 +101,8 @@ class DatabaseLogger:
                    q_est=None, q_threshold=None, q_uncertainty=None,
                    m1_q=None, m2_q=None, m_disagreement=None,
                    product_id=None,
-                   quality_flags: int = 0) -> int:
+                   quality_flags: int = 0,
+                   d_est=None) -> int:
         """Insert a record. Pressures/angles are auto-compressed to BLOB.
 
         v2.6: pressure_data_compressed and angle_data_compressed carry the
@@ -122,8 +126,8 @@ class DatabaseLogger:
                     "model_version,duration_s,point_count,leak_valve_status,end_angle,"
                     "cycle_profile_id,pressure_data_compressed,angle_data_compressed,"
                     "q_est,q_threshold,q_uncertainty,"
-                    "m1_q,m2_q,m_disagreement,product_id,quality_flags"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "m1_q,m2_q,m_disagreement,product_id,quality_flags,d_est"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (batch_id, cavity_id, ts, "",
                      None,
                      json.dumps(ai_values) if ai_values else None,
@@ -135,7 +139,8 @@ class DatabaseLogger:
                      cycle_profile_id, pressure_blob, angle_blob,
                      q_est, q_threshold, q_uncertainty,
                      m1_q, m2_q, m_disagreement, product_id,
-                     int(quality_flags) if quality_flags is not None else 0))
+                     int(quality_flags) if quality_flags is not None else 0,
+                     d_est))
                 self._conn.commit()
                 return cur.lastrowid
             except Exception as exc:
@@ -155,7 +160,7 @@ class DatabaseLogger:
                    # v2.6 fields — surface Q values + quality without forcing
                    # callers to fetch each record's full detail.
                    f"q_est,q_threshold,q_uncertainty,m1_q,m2_q,"
-                   f"m_disagreement,product_id,cycle_profile_id,quality_flags "
+                   f"m_disagreement,product_id,cycle_profile_id,quality_flags,d_est "
                    f"FROM test_records WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?")
             params.extend([limit, offset])
             try:
@@ -202,8 +207,22 @@ class DatabaseLogger:
         detail = self.query_record_detail(record_id)
         if detail is None:
             return None
-        detail["pressures"] = decompress_float_array(detail.pop("pressure_data_compressed", None)) or []
-        detail["angles"] = decompress_float_array(detail.pop("angle_data_compressed", None)) or []
+
+        def _curve(blob_key: str, text_key: str) -> List[float]:
+            arr = decompress_float_array(detail.pop(blob_key, None))
+            if arr is not None:
+                return arr
+            # Legacy v2.5 rows store the curve as JSON text, not a BLOB.
+            text = detail.get(text_key)
+            if text:
+                try:
+                    return json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return []
+
+        detail["pressures"] = _curve("pressure_data_compressed", "pressure_data")
+        detail["angles"] = _curve("angle_data_compressed", "angle_data")
         return detail
 
     def count_records(self) -> int:

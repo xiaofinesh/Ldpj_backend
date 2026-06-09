@@ -1,46 +1,25 @@
-Model Version: v1.3
-Trained At: 2026-03-24T08:50:56
-Dataset: combined_training_data.csv (19815 samples)
-Label source: valve
-Labels: 0=LEAK, 1=OK
-Features: pre-computed
-Threshold: 0.284271
-CV Folds: 10
+Deployed model bundle: v2.6.2-cal20260605
+Calibration: 茅台酒瓶 500mL 灌装态, 2026-06-05
+Hold window: [93, 283) deg  (runtime.yaml must match — risk R01)
 
-=== Metrics ===
-Accuracy:  0.9995
-F1-Score:  0.9996
-Precision: 0.9996
-Recall:    0.9995
-AUC-ROC:   0.9999
-10-Fold CV F1: 0.9996 (+/- 0.0003)
+── M1 (per-cabin linear regression, primary) ───────────────────────
+  feature : hold_trend_slope (signed, mbar/sample)
+  model   : Q = beta * hold_trend_slope + alpha
+  cabins  : 25/25 pass acceptance (min R^2 >= 0.99)
+  R^2     : median 0.9996, min 0.9994
+  beta    : [-0.2352, -0.2092] (negative; leak slope negative -> Q positive)
+  |alpha| : < 2e-3 for all cabins
+  k_ts    : |beta|/V_cabin median ~1014 (theory 1000, +1.4%), cross-cabin CV 0.3%
 
-=== Acceptance Check ===
-F1-Score >= 0.985:      0.9996  PASS
-Recall(LEAK) >= 0.990:  0.9996  PASS
-Precision(OK) >= 0.980: 0.9996  PASS
+── M2 (global XGBoost regression, cross-check / F010) ──────────────
+  features  : top-20 subset (see m2_metadata.json), log10(Q) space
+  train R^2 : 0.99956
+  test  R^2 : 0.99659  (R6 hold-out)
+  test  MAE : 6.94e-3 Pa*m3/s
 
-=== Confusion Matrix ===
-             pred=LEAK  pred=OK
-  act=LEAK       8908        4
-  act=OK            5    10898
+── Resolution (runtime.yaml::model_inference) ─────────────────────
+  A (estimate)   = 9.0e-3  Pa*m3/s   -> Q_threshold must exceed this
+  A_det (detect) = 1.56e-2 Pa*m3/s   -> recommended Q_threshold floor (POD>=99.87%)
 
-=== Classification Report ===
-              precision    recall  f1-score   support
-
-     LEAK(0)       1.00      1.00      1.00      8912
-       OK(1)       1.00      1.00      1.00     10903
-
-    accuracy                           1.00     19815
-   macro avg       1.00      1.00      1.00     19815
-weighted avg       1.00      1.00      1.00     19815
-
-
-=== Feature Importance ===
-  variance            : 0.6715
-  trend_slope         : 0.2539
-  difference          : 0.0690
-  cavity_id           : 0.0031
-  max                 : 0.0010
-  min                 : 0.0008
-  average             : 0.0007
+Source: 归档包_2026-06-05/PLC部署/ (m1_coefficients.json + m2 three-piece bundle).
+Re-deploy via: bash scripts/deploy_model.sh <artifact_dir>

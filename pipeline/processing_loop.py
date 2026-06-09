@@ -19,6 +19,7 @@ Pipeline per completed cycle:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -111,6 +112,13 @@ class ProcessingLoop:
         # ── Active product ────────────────────────────────────
         self._current_product_id = self._products_cfg.get("default_product_id", "default")
 
+        # ── Thin-wall micro-hole diameter (Yoshida choked-flow theory) ──
+        # The second of the dual outputs: Q_est (leak rate) + d_est (equivalent
+        # thin-wall pinhole diameter). Uses the operating point's vacuum plateau
+        # as the downstream pressure so it tracks any vacuum change.
+        self._p_chamber_pa = float(getattr(profile, "p_chamber_pa", 35000.0))
+        self._p_atm_pa = float(getattr(profile, "p_atm_pa", 101325.0))
+
         # ── Misc ──────────────────────────────────────────────
         self._loop_interval = float(runtime_cfg.get("loop_interval", 0.05))
         self._no_bottle_threshold = float(runtime_cfg.get("no_bottle_threshold", 50.0))
@@ -180,12 +188,29 @@ class ProcessingLoop:
 
         try:
             self._feed_fsm()
-            for cabin_id in self._fsm.get_processing_cabins():
-                self._process_cabin(cabin_id)
-            for cabin_id in self._fsm.get_fault_cabins():
-                self._handle_fault(cabin_id)
         except Exception as exc:
-            logger.error("Processing loop error: %s", exc, exc_info=True)
+            logger.error("feed_fsm error: %s", exc, exc_info=True)
+
+        # Per-cabin isolation: an exception while processing one cabin must NOT
+        # abort the loop and leave that cabin stuck in PROCESSING (which would
+        # re-raise every tick and starve all other cabins). Log, reset, move on.
+        for cabin_id in self._fsm.get_processing_cabins():
+            try:
+                self._process_cabin(cabin_id)
+            except Exception as exc:
+                logger.error("Cabin %d processing error: %s; resetting FSM",
+                             cabin_id, exc, exc_info=True)
+                self._reporter.raise_fault("F006", f"舱 {cabin_id} 处理异常: {exc}")
+                try:
+                    self._fsm.fsms[cabin_id].reset()
+                except Exception:
+                    pass
+
+        for cabin_id in self._fsm.get_fault_cabins():
+            try:
+                self._handle_fault(cabin_id)
+            except Exception as exc:
+                logger.error("Cabin %d fault-handling error: %s", cabin_id, exc)
 
         time.sleep(self._loop_interval)
 
@@ -232,6 +257,25 @@ class ProcessingLoop:
         m1_result = self._m1.predict(primary_slope, cabin_id)
         m1_q = float(m1_result["q_est"])
         m1_calibrated = bool(m1_result["cabin_calibrated"])
+
+        # Safety net: a non-finite Q (NaN/inf) — e.g. a corrupt NaN pressure on
+        # the S7 wire propagating through the features — must NEVER fall through
+        # to an OK verdict (NaN > threshold is False → would silently pass a
+        # leaker). Force N/A and raise the sensor-data fault instead.
+        if not math.isfinite(m1_q):
+            warn_throttled(
+                "processing_loop.nonfinite_q",
+                "Cabin %d: non-finite Q (NaN/inf) from M1 (slope=%.3e); "
+                "likely corrupt pressure data. Forcing N/A.",
+                cabin_id, primary_slope,
+            )
+            self._reporter.raise_fault("F003", f"舱 {cabin_id}: 压力/特征出现 NaN/inf")
+            return {
+                "q_est": 0.0, "valid": False,
+                "m1_q": 0.0, "m2_q": None, "m_disagreement": 0.0,
+                "q_uncertainty": float("inf"),
+                "cabin_calibrated": m1_calibrated, "below_resolution": True,
+            }
 
         # Negative q_est is physically impossible (would mean pressure rising
         # during hold) but can happen due to fit noise around zero. Below
@@ -352,6 +396,13 @@ class ProcessingLoop:
         elapsed_ms = (time.perf_counter() - t0) * 1000
         self._health.report_inference_latency(elapsed_ms)
 
+        # ── Second output: thin-wall pinhole equivalent diameter ──
+        # d (µm) via Yoshida choked-flow theory. Only meaningful when a verdict
+        # was actually formed (OK/LEAK) with positive Q; else 0.
+        q_est_val = float(q_result.get("q_est", 0.0) or 0.0)
+        d_est = (self._q_to_d_thinwall(q_est_val)
+                 if label in (LABEL_OK, LABEL_LEAK) and q_est_val > 0 else 0.0)
+
         # ── DB logging ────────────────────────────────────────
         try:
             self._db.log_record(
@@ -379,15 +430,18 @@ class ProcessingLoop:
                 m_disagreement=q_result.get("m_disagreement"),
                 product_id=self._current_product_id,
                 quality_flags=quality_flags,
+                d_est=d_est,
             )
         except Exception as exc:
             logger.error("DB logging failed for cabin %d: %s", cabin_id, exc)
             self._reporter.raise_fault("F006", f"数据库写入失败: {exc}")
 
-        # ── PLC write-back: cabinHealthStatus = Q_est ─────────
+        # ── PLC write-back: leakRate = Q_est + leakHoleDiameter = d_est ──
+        # Dual result; the PLC forms its own verdict (leakTestResult_edge) from
+        # Q+d. Health status is not sent.
         if label in (LABEL_OK, LABEL_LEAK):
             try:
-                self._sender.write_result(cabin_id, label, q_result["q_est"])
+                self._sender.write_result(cabin_id, q_result["q_est"], d_est)
             except Exception as exc:
                 logger.error("PLC write-back failed for cabin %d: %s", cabin_id, exc)
 
@@ -396,9 +450,9 @@ class ProcessingLoop:
             self._alarm.push_leak_alarm(cabin_id, q_result["q_est"])
 
         logger.info(
-            "Cabin %d: %s (Q=%.3e, threshold=%.3e, M1=%.3e, M2=%s, %.1fms)",
+            "Cabin %d: %s (Q=%.3e, d=%.1fum, threshold=%.3e, M1=%.3e, M2=%s, %.1fms)",
             cabin_id, label_str,
-            q_result.get("q_est", 0.0), q_threshold or 0.0,
+            q_result.get("q_est", 0.0), d_est, q_threshold or 0.0,
             q_result.get("m1_q", 0.0),
             f"{q_result['m2_q']:.3e}" if q_result.get("m2_q") is not None else "n/a",
             elapsed_ms,
@@ -428,11 +482,27 @@ class ProcessingLoop:
                 m1_q=0.0, m2_q=None, m_disagreement=0.0,
                 product_id=self._current_product_id,
                 quality_flags=quality_flags,
+                d_est=0.0,
             )
         except Exception as exc:
             logger.error("DB logging failed for cabin %d: %s", cabin_id, exc)
             self._reporter.raise_fault("F006", f"数据库写入失败: {exc}")
         fsm.reset()
+
+    def _q_to_d_thinwall(self, q_est: float) -> float:
+        """Thin-wall pinhole equivalent diameter (µm) from Q_est via Yoshida
+        choked-flow theory. Upstream = atmosphere, downstream = the operating
+        point's vacuum plateau (so d tracks any vacuum change). 0.0 if Q ≤ 0.
+        """
+        if q_est <= 0:
+            return 0.0
+        from core.q_d_conversion import q_to_d_choked
+        try:
+            return round(
+                q_to_d_choked(q_est, p_u=self._p_atm_pa, p_d=self._p_chamber_pa), 2)
+        except Exception as exc:
+            logger.debug("q_to_d_choked failed for Q=%.3e: %s", q_est, exc)
+            return 0.0
 
     @staticmethod
     def _confidence_from_q(q_result: Dict[str, Any]) -> float:

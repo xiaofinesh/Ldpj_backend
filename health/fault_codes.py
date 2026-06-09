@@ -14,4 +14,9 @@ FAULT_CODES = {
     "F010": {"description": "M1/M2 漏率估计差异过大", "level": "WARNING", "plc_value": 10},
     "F011": {"description": "M1 模型未标定该舱", "level": "WARNING", "plc_value": 11},
     "F012": {"description": "Q 估计低于系统分辨率", "level": "INFO", "plc_value": 12},
+    # v2.6.3 — operating-point (产量/转速 + 抽真空/真空度) consistency
+    "F013": {"description": "运行点采样间隔与M1/M2标定不一致, M2交叉校验已禁用",
+             "level": "WARNING", "plc_value": 13},
+    "F014": {"description": "运行点真空度与标定不一致, M2绝压特征失准",
+             "level": "WARNING", "plc_value": 14},
 }

@@ -46,12 +46,13 @@ class TestLoadCabinsConfig:
             load_cabins_config(missing)
 
     def test_load_real_repo_config(self):
-        """Production configs/cabins.yaml ships with 25 placeholder entries."""
+        """Production configs/cabins.yaml ships 25 calibrated entries (cal20260605)."""
         cfg = load_cabins_config()  # default = configs/cabins.yaml
         assert "cabins" in cfg
         assert "default" in cfg
         # 25 cabins must be present
         assert set(cfg["cabins"].keys()) == set(range(1, 26))
+        assert cfg.get("calibration_date") == "2026-06-05"
 
 
 class TestGetVCabin:
@@ -97,8 +98,11 @@ class TestIsCabinCalibrated:
         cfg = load_cabins_config(cabins_yaml)
         assert is_cabin_calibrated(cfg, 99) is False
 
-    def test_real_repo_all_placeholders(self):
-        """Initial repo state: all 25 cabins are placeholders (notes contains '占位')."""
+    def test_real_repo_all_calibrated(self):
+        """Deployed state (cal20260605): all 25 cabins are calibrated (no '占位')."""
         cfg = load_cabins_config()
         for cid in range(1, 26):
-            assert is_cabin_calibrated(cfg, cid) is False
+            assert is_cabin_calibrated(cfg, cid) is True
+        # Cabin 24 = 225 mL (盖盖 215 + 开盖 10), per README §2 P0.
+        v24, _ = get_v_cabin(cfg, 24)
+        assert v24 == pytest.approx(2.25e-4)

@@ -12,7 +12,7 @@ Bit layout (1 << N):
     3  QF_SHORT_HOLD           ← M1 critical: hold_trend_slope unreliable
     4  QF_SHORT_RELEASE
     5  QF_SHORT_BASELINE_POST
-    6  (reserved)
+    6  QF_NONFINITE            a feature value was NaN/inf (corrupt pressure)
     7  QF_CD_CLAMPED           q_d_conversion C_d hit [0.5, 0.95] limit
                                 (set externally by ResultSender / API
                                  path that calls q_to_d_choked)
@@ -25,6 +25,7 @@ written before the migration may have bit 3 set with the old meaning.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Mapping
 
 QF_DEGENERATE_INPUT      = 1 << 0
@@ -33,7 +34,7 @@ QF_SHORT_EVAC            = 1 << 2
 QF_SHORT_HOLD            = 1 << 3
 QF_SHORT_RELEASE         = 1 << 4
 QF_SHORT_BASELINE_POST   = 1 << 5
-# bit 6 reserved
+QF_NONFINITE             = 1 << 6   # a feature value was NaN/inf
 QF_CD_CLAMPED            = 1 << 7
 
 # Section name → bit. Order MUST match SECTION_NAMES in cycle_profile.py.
@@ -70,4 +71,10 @@ def compute_quality_flags(feats: Mapping[str, float]) -> int:
             nonzero_section = True
     if not nonzero_section:
         flags |= QF_DEGENERATE_INPUT
+    # Flag any NaN/inf feature — the most dangerous silent corruption, since a
+    # NaN Q would compare False against any threshold and read as OK.
+    for v in feats.values():
+        if isinstance(v, float) and not math.isfinite(v):
+            flags |= QF_NONFINITE
+            break
     return flags

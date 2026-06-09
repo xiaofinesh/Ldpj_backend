@@ -222,11 +222,11 @@ class TestQJudgment:
         loop._process_cabin(1)
 
         loop._sender.write_result.assert_called_once()
-        cabin_id, label, q = loop._sender.write_result.call_args[0]
+        cabin_id, q, d = loop._sender.write_result.call_args[0]   # (cabin, Q, d)
         assert cabin_id == 1
-        assert label == LABEL_LEAK
         assert q > 0
-        loop._alarm.push_leak_alarm.assert_called_once()
+        assert d > 0
+        loop._alarm.push_leak_alarm.assert_called_once()          # LEAK still alarms
 
     def test_low_q_labels_ok(self, loaded_m1, unloaded_m2, temp_db):
         """Tiny slope → Q above resolution but below product threshold → OK."""
@@ -242,9 +242,10 @@ class TestQJudgment:
 
         loop._process_cabin(2)
 
-        cabin_id, label, q = loop._sender.write_result.call_args[0]
-        assert label == LABEL_OK
-        loop._alarm.push_leak_alarm.assert_not_called()
+        cabin_id, q, d = loop._sender.write_result.call_args[0]
+        assert q > 0 and d > 0
+        loop._alarm.push_leak_alarm.assert_not_called()           # OK: no alarm
+        assert temp_db.query_records(limit=1)[0]["label"] == LABEL_OK
 
     def test_no_bottle_skips_inference_and_writeback(self, loaded_m1, unloaded_m2, temp_db):
         rep = FaultReporter()
@@ -267,6 +268,106 @@ class TestQJudgment:
             )
             label = cur.fetchone()[0]
         assert label == LABEL_NO_BOTTLE
+
+
+class TestRobustness:
+    def test_nan_pressure_forces_na_not_ok(self, loaded_m1, unloaded_m2, temp_db):
+        """A NaN pressure (corrupt S7 wire) must NOT write back as OK —
+        NaN > threshold is False, which would silently pass a leaker."""
+        rep = FaultReporter()
+        loop = _make_loop(
+            m1=loaded_m1, m2=unloaded_m2,
+            runtime=_runtime_cfg(),
+            products=_products_cfg(q_threshold=1e-2),
+            cabins=_cabins_cfg(), db=temp_db, fault_reporter=rep,
+        )
+        _seed_fsm_with_cycle(loop._fsm.fsms[1], slope_per_sample=float("nan"))
+        loop._process_cabin(1)
+
+        loop._sender.write_result.assert_not_called()   # no OK/LEAK writeback
+        recs = temp_db.query_records(limit=10)
+        assert recs and recs[0]["label"] == LABEL_NA
+        assert "F003" in {f["code"] for f in rep.summary()["faults"]}
+
+    def test_one_cabin_exception_does_not_starve_others(self, loaded_m1, unloaded_m2, temp_db):
+        """An exception processing one cabin must not abort the loop or wedge
+        that cabin in PROCESSING — it is reset and other cabins still run."""
+        rep = FaultReporter()
+        loop = _make_loop(
+            m1=loaded_m1, m2=unloaded_m2,
+            runtime=_runtime_cfg(),
+            products=_products_cfg(q_threshold=1e-2),
+            cabins=_cabins_cfg(), db=temp_db, fault_reporter=rep,
+        )
+        loop._poller.drain_frames_since_seq = MagicMock(return_value=[])
+        loop.start()
+
+        orig = loaded_m1.predict
+        def boom(slope, cid):
+            if cid == 1:
+                raise RuntimeError("simulated cabin-1 failure")
+            return orig(slope, cid)
+        loaded_m1.predict = boom
+
+        _seed_fsm_with_cycle(loop._fsm.fsms[1], slope_per_sample=-0.5)
+        _seed_fsm_with_cycle(loop._fsm.fsms[2], slope_per_sample=-0.5)
+        loop.run_once()
+
+        assert loop._fsm.fsms[1].state == CycleState.IDLE   # reset, not stuck
+        cavids = {r["cavity_id"] for r in temp_db.query_records(limit=10)}
+        assert 2 in cavids                                  # cabin 2 still processed
+        assert "F006" in {f["code"] for f in rep.summary()["faults"]}
+
+
+class TestDualOutput:
+    """v2.6.4: every verdict carries BOTH leak rate Q and thin-wall pinhole
+    diameter d (Yoshida choked theory)."""
+
+    def test_leak_record_has_q_and_thinwall_d(self, loaded_m1, unloaded_m2, temp_db):
+        from core.q_d_conversion import q_to_d_choked
+        rep = FaultReporter()
+        loop = _make_loop(
+            m1=loaded_m1, m2=unloaded_m2,
+            runtime=_runtime_cfg(),
+            products=_products_cfg(q_threshold=1e-4),   # tight → LEAK
+            cabins=_cabins_cfg(), db=temp_db, fault_reporter=rep,
+        )
+        _seed_fsm_with_cycle(loop._fsm.fsms[1], slope_per_sample=-5.0)
+        loop._process_cabin(1)
+
+        _, q, d = loop._sender.write_result.call_args[0]
+        assert q > 0 and d > 0          # PLC gets dual result Q + d
+        assert temp_db.query_records(limit=1)[0]["label"] == LABEL_LEAK
+
+        rec = temp_db.query_records(limit=1)[0]
+        assert rec["q_est"] > 0
+        assert rec["d_est"] > 0                        # diameter present (dual output)
+        expected = round(q_to_d_choked(rec["q_est"],
+                                       p_u=loop._p_atm_pa, p_d=loop._p_chamber_pa), 2)
+        assert abs(rec["d_est"] - expected) < 0.5      # matches Yoshida theory
+
+    def test_na_record_has_zero_diameter(self, loaded_m1, unloaded_m2, temp_db):
+        """Below-resolution / N/A has no meaningful diameter → d_est = 0."""
+        rep = FaultReporter()
+        loop = _make_loop(
+            m1=loaded_m1, m2=unloaded_m2,
+            runtime=_runtime_cfg(a_resolution=1.0),     # huge A → below resolution
+            products=_products_cfg(), cabins=_cabins_cfg(),
+            db=temp_db, fault_reporter=rep,
+        )
+        _seed_fsm_with_cycle(loop._fsm.fsms[1], slope_per_sample=-0.5)
+        loop._process_cabin(1)
+        rec = temp_db.query_records(limit=1)[0]
+        assert (rec["d_est"] or 0.0) == 0.0
+
+    def test_diameter_tracks_vacuum(self, loaded_m1, unloaded_m2, temp_db):
+        """Yoshida d depends on the chamber (vacuum) pressure — a deeper vacuum
+        (lower p_chamber) gives a different diameter for the same Q."""
+        from core.q_d_conversion import q_to_d_choked
+        q = 3.0e-2
+        d_35 = q_to_d_choked(q, p_u=101325.0, p_d=35000.0)
+        d_25 = q_to_d_choked(q, p_u=101325.0, p_d=25000.0)
+        assert d_35 != pytest.approx(d_25)
 
 
 class TestM1Unloaded:

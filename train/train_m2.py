@@ -38,7 +38,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from configs.loaders import load_active_cycle_profile
 from core.feature_spec import FEATURE_ORDER_36D
+from core.operating_point import fingerprint_from_profile
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -178,6 +180,10 @@ def main(argv=None) -> int:
     booster.save_model(str(out_dir / "m2_xgb_model.json"))
     joblib.dump(scaler_sel, out_dir / "m2_xgb_scaler.joblib")
 
+    # v2.6.3: stamp the operating point so the startup gate can validate the
+    # vacuum-sensitive absolute-pressure features M2 relies on.
+    profile = load_active_cycle_profile()
+
     metadata = {
         "version": args.version,
         "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -185,6 +191,7 @@ def main(argv=None) -> int:
         "n_train": int(len(df_train)),
         "n_test": int(len(df_test)),
         "log_space": True,
+        "operating_point": fingerprint_from_profile(profile),
         "feature_subset": top_k_names,
         "feature_importance": {n: float(v) for n, v in sorted_imp[:args.top_k_features]},
         "hyperparameters": {

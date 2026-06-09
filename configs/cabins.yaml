@@ -1,42 +1,47 @@
 # 各真空舱有效体积 V_cabin 标定值
-# 单位: m³ (= 立方米); 注水法测量, 通常在 [2.5e-4, 4.0e-4] 区间
+# 单位: m³ (= 立方米); 注水法测量(盖瓶盖口径), 通常在 [2.0e-4, 2.4e-4] 区间
 # Cabin[0] 为预留, 不参与
 # u_v_cabin 为标定不确定度 (1-sigma, 单位 m³)
 #
-# 占位值通过 scripts/calibrate_v_cabin.py 替换为实际标定结果。
+# 数据来源: 2026-06-05 终版标定 (茅台酒瓶 500mL 灌装态)。
+#   原始: 舱室间隙V_Cabin测量结果.xlsx(注水法); 取整到 mL。
+#   自洽性: k_ts = |β|/V_cabin 中位 ≈ 1014 (理论 1000, +1.4%), 跨舱 CV 0.3%
+#           —— β(m1_coefficients.json) 与 V_cabin 物理一致。
+#   舱24: 盖瓶盖实测 215 mL → 开盖修正 +10 = 225 mL (用户 6/5 提供)。
+# 注: V_cabin 已隐含于 M1 的 β 中, 推理时不直接用; 此表供重标定与追溯。
 
-calibration_date: ""    # 实验日填入 YYYY-MM-DD
-calibrator: ""          # 标定人姓名
+calibration_date: "2026-06-05"
+calibrator: "标定组"
 
 cabins:
-  1:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  2:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  3:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  4:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  5:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  6:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  7:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  8:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  9:  { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  10: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  11: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  12: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  13: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  14: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  15: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  16: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  17: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  18: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  19: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  20: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  21: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  22: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  23: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  24: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
-  25: { v_cabin: 3.50e-4, u_v_cabin: 7.0e-6, notes: "初始占位值" }
+  1:  { v_cabin: 2.07e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (207 mL)" }
+  2:  { v_cabin: 2.10e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (210 mL)" }
+  3:  { v_cabin: 2.25e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (225 mL)" }
+  4:  { v_cabin: 2.18e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (218 mL)" }
+  5:  { v_cabin: 2.32e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (232 mL)" }
+  6:  { v_cabin: 2.22e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (222 mL)" }
+  7:  { v_cabin: 2.07e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (207 mL)" }
+  8:  { v_cabin: 2.29e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (229 mL)" }
+  9:  { v_cabin: 2.16e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (216 mL)" }
+  10: { v_cabin: 2.27e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (227 mL)" }
+  11: { v_cabin: 2.20e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (220 mL)" }
+  12: { v_cabin: 2.25e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (225 mL)" }
+  13: { v_cabin: 2.15e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (215 mL); 历史异常舱, 见本底巡检" }
+  14: { v_cabin: 2.21e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (221 mL)" }
+  15: { v_cabin: 2.17e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (217 mL)" }
+  16: { v_cabin: 2.29e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (229 mL)" }
+  17: { v_cabin: 2.31e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (231 mL)" }
+  18: { v_cabin: 2.27e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (227 mL)" }
+  19: { v_cabin: 2.23e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (223 mL)" }
+  20: { v_cabin: 2.22e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (222 mL)" }
+  21: { v_cabin: 2.11e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (211 mL)" }
+  22: { v_cabin: 2.19e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (219 mL)" }
+  23: { v_cabin: 2.20e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (220 mL)" }
+  24: { v_cabin: 2.25e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (225 mL = 盖盖 215 + 开盖 10)" }
+  25: { v_cabin: 2.20e-4, u_v_cabin: 2.0e-6, notes: "实测 2026-06 (220 mL); 历史异常舱(5/19 已修复)" }
 
 # 默认值: 当某 cabin 未标定时使用 (V_cabin 占位值)
 default:
-  v_cabin: 2.15e-4
+  v_cabin: 2.20e-4
   u_v_cabin: 4.0e-6
-  notes: "fallback for uncalibrated cabin"
+  notes: "fallback for uncalibrated cabin (跨舱中位 ≈ 220 mL)"
